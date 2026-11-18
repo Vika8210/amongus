@@ -200,7 +200,7 @@ function getTaskPublicInfo(taskId) {
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = 'sdmcet2024';
 
 function getLocalIP() {
@@ -239,17 +239,19 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(publicDir, 'admin.html'));
 });
 
-// QR Code PNG — supports per-lobby ?code=XXXXXX
+// QR Code PNG — supports per-lobby ?code=XXXXXX (local or cloud-hosted domain)
 app.get('/qr', async (req, res) => {
   try {
     const localIP = getLocalIP();
+    const host = req.get('host') || `${localIP}:${PORT}`;
+    const proto = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
     const code = String(req.query.code || '').trim().toUpperCase();
     const activeCode = (code && lobbies.has(code))
       ? code
       : (lobbies.size > 0 ? lobbies.keys().next().value : '');
     const joinUrl = activeCode
-      ? `http://${localIP}:${PORT}/?code=${activeCode}`
-      : `http://${localIP}:${PORT}`;
+      ? `${proto}://${host}/?code=${activeCode}`
+      : `${proto}://${host}`;
     const qrBuffer = await QRCode.toBuffer(joinUrl, {
       type: 'png',
       width: 320,
