@@ -243,15 +243,20 @@ app.get('/admin', (req, res) => {
 app.get('/qr', async (req, res) => {
   try {
     const localIP = getLocalIP();
-    const host = req.get('host') || `${localIP}:${PORT}`;
-    const proto = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const publicUrl = process.env.RENDER_EXTERNAL_URL;
+    let base = publicUrl;
+    if (!base) {
+      const host = req.get('host') || `${localIP}:${PORT}`;
+      const proto = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+      base = `${proto}://${host}`;
+    }
     const code = String(req.query.code || '').trim().toUpperCase();
     const activeCode = (code && lobbies.has(code))
       ? code
       : (lobbies.size > 0 ? lobbies.keys().next().value : '');
     const joinUrl = activeCode
-      ? `${proto}://${host}/?code=${activeCode}`
-      : `${proto}://${host}`;
+      ? `${base}/?code=${activeCode}`
+      : `${base}`;
     const qrBuffer = await QRCode.toBuffer(joinUrl, {
       type: 'png',
       width: 320,
@@ -1365,10 +1370,11 @@ function handleMessage(ws, socketId, msg) {
 // ----------------------------------------------------------------------------
 server.listen(PORT, '0.0.0.0', () => {
   const localIP = getLocalIP();
+  const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://${localIP}:${PORT}`;
   console.log(`\n======================================================`);
   console.log(`🚀 Among Us: The Skeld — Multi-Lobby Server Running!`);
-  console.log(`📱 Players join at: http://${localIP}:${PORT}`);
-  console.log(`⚙️  Admin panel at: http://${localIP}:${PORT}/admin`);
-  console.log(`📷 QR code at: http://${localIP}:${PORT}/qr`);
+  console.log(`📱 Players join at: ${publicUrl}`);
+  console.log(`⚙️  Admin panel at: ${publicUrl}/admin`);
+  console.log(`📷 QR code at: ${publicUrl}/qr`);
   console.log(`======================================================\n`);
 });
