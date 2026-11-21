@@ -4,6 +4,7 @@ import { movePlayerWithCollision } from '../../game/skeldCollision.js';
 import { renderSkeldFrame, screenToWorld, isStationSabotaged } from '../../game/skeldRenderer.js';
 import { InputController } from '../../game/inputController.js';
 import { SKELD_VENTS } from '../../game/skeldMapData.js';
+import { getNextQuestionForStation } from '../../game/taskCatalog.js';
 
 /**
  * 60 FPS Skeld Canvas Component
@@ -16,6 +17,7 @@ export default function GameCanvas({
   onSendMove,
   onProximitySync,
   onTapStation,
+  onCallEmergency,
   onShowToast
 }) {
   const canvasRef = useRef(null);
@@ -42,6 +44,19 @@ export default function GameCanvas({
       const world = screenToWorld(screenX, screenY, canvas, state);
       const isImp = String(state.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
 
+      // 0. Direct tap on Cafeteria Emergency Table
+      const distToTableCenter = Math.hypot(world.x - CONFIG.EMERGENCY_TABLE_POS.x, world.y - CONFIG.EMERGENCY_TABLE_POS.y);
+      if (distToTableCenter <= 75) {
+        const playerDist = Math.hypot(state.myPlayer.x - CONFIG.EMERGENCY_TABLE_POS.x, state.myPlayer.y - CONFIG.EMERGENCY_TABLE_POS.y);
+        if (playerDist <= CONFIG.EMERGENCY_TABLE_RADIUS) {
+          inputRef.current?.resetAll();
+          onCallEmergency?.();
+        } else {
+          onShowToast('🏃 Walk closer to the Cafeteria table to call an Emergency Meeting!', 'warning');
+        }
+        return;
+      }
+
       // 1. Direct tap on the active Sabotage console (must walk there first!)
       if (state.activeSabotage) {
         const sabStation = state.stations.find((st) => isStationSabotaged(st, state.activeSabotage));
@@ -62,11 +77,12 @@ export default function GameCanvas({
 
       // 2. Crewmate direct tap on an assigned remaining Task console
       if (!isImp) {
+        const sec = state.settings?.questionSection || 1;
+        const assignedList = state.assignedTasks || [];
         for (const st of state.stations) {
-          const isMyTask =
-            state.assignedTasks.includes(st.id) &&
-            !state.myPlayer.completedTasks.includes(st.id);
-          if (!isMyTask) continue;
+          if (!assignedList.includes(st.id)) continue;
+          const nextQ = getNextQuestionForStation(st.id, sec, state.myPlayer.completedTasks);
+          if (!nextQ) continue;
 
           if (Math.hypot(world.x - st.x, world.y - st.y) <= 68) {
             const dist = Math.hypot(state.myPlayer.x - st.x, state.myPlayer.y - st.y);
@@ -115,7 +131,8 @@ export default function GameCanvas({
             state.myPlayer.vy = dy;
             if (Math.abs(dx) > 0.05) state.myPlayer.facing = dx > 0 ? 1 : -1;
 
-            const speed = Math.max(2.5, (state.settings.moveSpeed || 3) * 1.75);
+            const baseSpeed = Number(state.settings?.moveSpeed ?? state.settings?.playerSpeed ?? 3);
+            const speed = Math.max(0.5, baseSpeed * 1.6);
             movePlayerWithCollision(state.myPlayer, dx, dy, speed);
 
             if (now - lastMoveSent > CONFIG.MOVE_SEND_INTERVAL_MS) {
@@ -134,8 +151,9 @@ export default function GameCanvas({
         }
 
         // Timers
-        if (state.phase === 'PLAYING' && state.taskRefreshTimeLeft > 0) {
-          state.taskRefreshTimeLeft = Math.max(0, state.taskRefreshTimeLeft - dt);
+        if (state.phase === 'PLAYING') {
+          if (state.gameTimeLeft > 0) state.gameTimeLeft = Math.max(0, state.gameTimeLeft - dt);
+          if (state.taskRefreshTimeLeft > 0) state.taskRefreshTimeLeft = Math.max(0, state.taskRefreshTimeLeft - dt);
         }
         if (state.killCooldown > 0) {
           state.killCooldown = Math.max(0, state.killCooldown - dt);
@@ -147,20 +165,20 @@ export default function GameCanvas({
         let nearSab = false;
 
         if (!state.myPlayer.isDead) {
+          const sec = state.settings?.questionSection || 1;
+          const assignedList = state.assignedTasks || [];
           for (const st of state.stations) {
             const dist = Math.hypot(state.myPlayer.x - st.x, state.myPlayer.y - st.y);
             const isSab = isStationSabotaged(st, state.activeSabotage);
-            const isMyTask =
-              !isImp &&
-              state.assignedTasks.includes(st.id) &&
-              !state.myPlayer.completedTasks.includes(st.id);
+            const isAssigned = assignedList.includes(st.id);
+            const hasTaskRemaining = !isImp && isAssigned && getNextQuestionForStation(st.id, sec, state.myPlayer.completedTasks) !== null;
 
             if (isSab && dist <= CONFIG.SABOTAGE_FIX_RADIUS) {
               nearStation = st;
               nearSab = true;
               break;
             }
-            if (isMyTask && dist <= CONFIG.PROXIMITY_RADIUS) {
+            if (hasTaskRemaining && dist <= CONFIG.PROXIMITY_RADIUS) {
               nearStation = st;
               nearSab = false;
               break;
@@ -191,20 +209,41 @@ export default function GameCanvas({
         }
         state.deadBodyNear = nearBody;
 
+        const distToTable = Math.hypot(state.myPlayer.x - CONFIG.EMERGENCY_TABLE_POS.x, state.myPlayer.y - CONFIG.EMERGENCY_TABLE_POS.y);
+        const nearEmergencyTable = !state.myPlayer.isDead && !state.myPlayer.inVent && distToTable <= CONFIG.EMERGENCY_TABLE_RADIUS;
+        state.nearEmergencyTable = nearEmergencyTable;
+
+        let canKillTarget = false;
+        if (isImp && !state.myPlayer.isDead && !state.myPlayer.inVent && (state.killCooldown || 0) <= 0) {
+          for (const p of state.players.values()) {
+            if (!p.isDead && !p.inVent && String(p.role || '').toUpperCase() !== 'IMPOSTOR') {
+              if (Math.hypot(state.myPlayer.x - p.x, state.myPlayer.y - p.y) <= CONFIG.KILL_RADIUS) {
+                canKillTarget = true;
+                break;
+              }
+            }
+          }
+        }
+        state.canKillTarget = canKillTarget;
+
         // Only push React state update when proximity or whole-second countdown actually changes!
+        const gameInt = Math.ceil(state.gameTimeLeft || 0);
         const waveInt = Math.ceil(state.taskRefreshTimeLeft || 0);
         const killInt = Math.ceil(state.killCooldown || 0);
-        const syncKey = `${nearStation?.id || ''}|${nearSab}|${nearVent?.id || ''}|${nearBody?.id || ''}|${killInt}`;
-        if (syncKey !== lastHudSyncKey || waveInt !== lastTimerInt) {
+        const syncKey = `${nearStation?.id || ''}|${nearSab}|${nearVent?.id || ''}|${nearBody?.id || ''}|${nearEmergencyTable}|${canKillTarget}|${killInt}|${gameInt}|${waveInt}`;
+        if (syncKey !== lastHudSyncKey || gameInt !== lastTimerInt) {
           lastHudSyncKey = syncKey;
-          lastTimerInt = waveInt;
+          lastTimerInt = gameInt;
           onProximitySync({
             nearStation,
             nearSabotage: nearSab,
             nearVent,
             nearBody,
+            nearEmergencyTable,
+            canKillTarget,
             killCooldown: killInt,
-            waveTimeLeft: waveInt
+            waveTimeLeft: waveInt,
+            gameTimeLeft: gameInt
           });
         }
 
@@ -222,7 +261,7 @@ export default function GameCanvas({
       window.removeEventListener('resize', resize);
       input.destroy();
     };
-  }, [engineRef, isModalOpenRef, onSendMove, onProximitySync, onTapStation, onShowToast]);
+  }, [engineRef, isModalOpenRef, onSendMove, onProximitySync, onTapStation, onCallEmergency, onShowToast]);
 
   return <canvas id="gameCanvas" ref={canvasRef} />;
 }

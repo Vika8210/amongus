@@ -1,6 +1,49 @@
 /**
  * Authentic Among Us Crewmate, Ghost & Dead Body 2D Sprite Renderer
+ * Features rock-solid cross-browser rounded rect rendering that never crashes.
  */
+
+// Universal safe roundRect helper that works in 100% of browsers & mobile WebViews without recursion
+export function drawRoundRect(ctx, x, y, w, h, r = 0) {
+  let tl = 0, tr = 0, br = 0, bl = 0;
+  if (typeof r === 'number') {
+    tl = tr = br = bl = Math.max(0, r);
+  } else if (Array.isArray(r)) {
+    if (r.length === 1) tl = tr = br = bl = Math.max(0, r[0]);
+    else if (r.length === 2) { tl = br = Math.max(0, r[0]); tr = bl = Math.max(0, r[1]); }
+    else if (r.length === 4) { [tl, tr, br, bl] = r.map(v => Math.max(0, v)); }
+  }
+
+  const maxR = Math.min(Math.abs(w) / 2, Math.abs(h) / 2);
+  tl = Math.min(tl, maxR);
+  tr = Math.min(tr, maxR);
+  br = Math.min(br, maxR);
+  bl = Math.min(bl, maxR);
+
+  if (tl === 0 && tr === 0 && br === 0 && bl === 0) {
+    ctx.rect(x, y, w, h);
+    return;
+  }
+
+  ctx.moveTo(x + tl, y);
+  ctx.lineTo(x + w - tr, y);
+  ctx.arcTo(x + w, y, x + w, y + tr, tr);
+  ctx.lineTo(x + w, y + h - br);
+  ctx.arcTo(x + w, y + h, x + w - br, y + h, br);
+  ctx.lineTo(x + bl, y + h);
+  ctx.arcTo(x, y + h, x, y + h - bl, bl);
+  ctx.lineTo(x, y + tl);
+  ctx.arcTo(x, y, x + tl, y, tl);
+  ctx.closePath();
+}
+
+// Global prototype polyfill for safety
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+    drawRoundRect(this, x, y, w, h, r);
+  };
+}
+
 function shadeColor(hex, factor = 0.65) {
   if (!hex || !hex.startsWith('#') || hex.length !== 7) return '#1e293b';
   const r = Math.round(parseInt(hex.slice(1, 3), 16) * factor);
@@ -10,14 +53,14 @@ function shadeColor(hex, factor = 0.65) {
 }
 
 export function drawCrewmate(ctx, player, isMe, time) {
-  const px = player.x;
+  const px = Number.isFinite(player.x) ? player.x : 1540;
   const isDead = !!player.isDead;
   const isMoving = Math.abs(player.vx || 0) > 0.05 || Math.abs(player.vy || 0) > 0.05;
   const facing = (player.facing ?? 1) >= 0 ? 1 : -1;
   const baseColor = player.color || '#c51111';
   const shadowColor = shadeColor(baseColor, 0.64);
 
-  let py = player.y;
+  let py = Number.isFinite(player.y) ? player.y : 340;
   const walkSwing = isMoving && !isDead ? Math.sin(time * 16) * 5.5 : 0;
   const walkBob = isMoving && !isDead ? Math.abs(Math.sin(time * 16)) * 2.5 : 0;
 
@@ -29,14 +72,14 @@ export function drawCrewmate(ctx, player, isMe, time) {
 
   ctx.fillStyle = 'rgba(0, 0, 0, 0.34)';
   ctx.beginPath();
-  ctx.ellipse(px, player.y + 20, 18, 7, 0, 0, Math.PI * 2);
+  ctx.ellipse(px, py + 20, 18, 7, 0, 0, Math.PI * 2);
   ctx.fill();
 
   if (isMe && !isDead) {
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.ellipse(px, player.y + 20, 22 + Math.sin(time * 4) * 1.5, 9, 0, 0, Math.PI * 2);
+    ctx.ellipse(px, py + 20, 22 + Math.sin(time * 4) * 1.5, 9, 0, 0, Math.PI * 2);
     ctx.stroke();
   }
 
@@ -51,26 +94,26 @@ export function drawCrewmate(ctx, player, isMe, time) {
   ctx.strokeStyle = outline;
   ctx.lineWidth = 2.8;
   ctx.beginPath();
-  ctx.roundRect(-21, -10, 10, 22, 5);
+  drawRoundRect(ctx, -21, -10, 10, 22, 5);
   ctx.fill();
   ctx.fillStyle = baseColor;
   ctx.beginPath();
-  ctx.roundRect(-20, -9, 8, 12, 4);
+  drawRoundRect(ctx, -20, -9, 8, 12, 4);
   ctx.fill();
   ctx.beginPath();
-  ctx.roundRect(-21, -10, 10, 22, 5);
+  drawRoundRect(ctx, -21, -10, 10, 22, 5);
   ctx.stroke();
 
   // Legs or Ghost Tail
   if (!isDead) {
     ctx.fillStyle = shadowColor;
     ctx.beginPath();
-    ctx.roundRect(-11 + walkSwing * 0.6, 8, 9, 13, 4);
+    drawRoundRect(ctx, -11 + walkSwing * 0.6, 8, 9, 13, 4);
     ctx.fill();
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.roundRect(2 - walkSwing * 0.6, 8, 9, 13, 4);
+    drawRoundRect(ctx, 2 - walkSwing * 0.6, 8, 9, 13, 4);
     ctx.fill();
     ctx.stroke();
   } else {
@@ -87,12 +130,12 @@ export function drawCrewmate(ctx, player, isMe, time) {
   // Torso (Two-tone cel-shaded)
   ctx.fillStyle = shadowColor;
   ctx.beginPath();
-  ctx.roundRect(-14, -20, 28, 33, [14, 14, 9, 9]);
+  drawRoundRect(ctx, -14, -20, 28, 33, [14, 14, 9, 9]);
   ctx.fill();
 
   ctx.save();
   ctx.beginPath();
-  ctx.roundRect(-14, -20, 28, 33, [14, 14, 9, 9]);
+  drawRoundRect(ctx, -14, -20, 28, 33, [14, 14, 9, 9]);
   ctx.clip();
   ctx.fillStyle = baseColor;
   ctx.beginPath();
@@ -103,7 +146,7 @@ export function drawCrewmate(ctx, player, isMe, time) {
   ctx.strokeStyle = outline;
   ctx.lineWidth = 2.8;
   ctx.beginPath();
-  ctx.roundRect(-14, -20, 28, 33, [14, 14, 9, 9]);
+  drawRoundRect(ctx, -14, -20, 28, 33, [14, 14, 9, 9]);
   ctx.stroke();
 
   // Glossy Visor
@@ -111,18 +154,18 @@ export function drawCrewmate(ctx, player, isMe, time) {
   ctx.strokeStyle = outline;
   ctx.lineWidth = 2.4;
   ctx.beginPath();
-  ctx.roundRect(-1, -13, 18, 12, 6);
+  drawRoundRect(ctx, -1, -13, 18, 12, 6);
   ctx.fill();
   ctx.fillStyle = '#9be2f7';
   ctx.beginPath();
-  ctx.roundRect(1, -12, 14, 8, 4);
+  drawRoundRect(ctx, 1, -12, 14, 8, 4);
   ctx.fill();
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
   ctx.ellipse(9, -9.5, 4.5, 2, -0.1, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.roundRect(-1, -13, 18, 12, 6);
+  drawRoundRect(ctx, -1, -13, 18, 12, 6);
   ctx.stroke();
 
   if (isDead) {
@@ -142,7 +185,7 @@ export function drawCrewmate(ctx, player, isMe, time) {
 
   ctx.fillStyle = 'rgba(10, 14, 24, 0.86)';
   ctx.beginPath();
-  ctx.roundRect(px - tw / 2 - 7, tagY - 11, tw + 14, 18, 5);
+  drawRoundRect(ctx, px - tw / 2 - 7, tagY - 11, tw + 14, 18, 5);
   ctx.fill();
   ctx.strokeStyle = isMe ? '#38bdf8' : 'rgba(255, 255, 255, 0.22)';
   ctx.lineWidth = 1.2;
@@ -156,7 +199,8 @@ export function drawCrewmate(ctx, player, isMe, time) {
 }
 
 export function drawDeadBody(ctx, body) {
-  const { x, y } = body;
+  const x = Number.isFinite(body.x) ? body.x : 1540;
+  const y = Number.isFinite(body.y) ? body.y : 340;
   const baseColor = body.color || '#c51111';
   const shadowColor = shadeColor(baseColor, 0.62);
 
@@ -170,7 +214,7 @@ export function drawDeadBody(ctx, body) {
   ctx.strokeStyle = '#090c12';
   ctx.lineWidth = 2.6;
   ctx.beginPath();
-  ctx.roundRect(x - 14, y - 2, 28, 16, [4, 4, 9, 9]);
+  drawRoundRect(ctx, x - 14, y - 2, 28, 16, [4, 4, 9, 9]);
   ctx.fill();
   ctx.stroke();
 
@@ -181,7 +225,7 @@ export function drawDeadBody(ctx, body) {
   ctx.strokeStyle = '#090c12';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.roundRect(x - 3.5, y - 16, 7, 15, 2);
+  drawRoundRect(ctx, x - 3.5, y - 16, 7, 15, 2);
   ctx.fill();
   ctx.stroke();
   ctx.beginPath();

@@ -13,13 +13,14 @@ import {
   skeldGrid,
   skeldRoomAtCell
 } from './skeldMapData.js';
-import { drawCrewmate, drawDeadBody } from './characterRenderer.js';
+import { drawCrewmate, drawDeadBody, drawRoundRect } from './characterRenderer.js';
+import { getNextQuestionForStation } from './taskCatalog.js';
 
 let cachedStaticShip = null;
 
 function fillStrokeRoundRect(c, x, y, w, h, r, fill, stroke, lw = 2) {
   c.beginPath();
-  c.roundRect(x, y, w, h, r);
+  drawRoundRect(c, x, y, w, h, r);
   if (fill) { c.fillStyle = fill; c.fill(); }
   if (stroke) { c.strokeStyle = stroke; c.lineWidth = lw; c.stroke(); }
 }
@@ -314,10 +315,10 @@ export function screenToWorld(screenX, screenY, canvas, state) {
 }
 
 function getEffectiveVisionRadius(state) {
-  if (state.myPlayer.isDead) return Infinity;
-  const isImp = String(state.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
-  const basePx = isImp ? (state.settings?.impostorVision || 250) : (state.settings?.crewVision || 150);
-  let radius = basePx * 1.45;
+  if (state.myPlayer?.isDead) return Infinity;
+  const isImp = String(state.myPlayer?.role || '').toUpperCase() === 'IMPOSTOR';
+  const basePx = Number(isImp ? (state.settings?.impostorVision ?? state.settings?.impVision ?? 250) : (state.settings?.crewVision ?? 150));
+  let radius = Math.max(120, (Number.isFinite(basePx) ? basePx : (isImp ? 250 : 150)) * 1.45);
   const sabId = String(state.activeSabotage?.buildingId || '').toLowerCase();
   if (!isImp && sabId === 'electrical') radius = Math.max(95, radius * 0.52);
   return radius;
@@ -334,7 +335,9 @@ export function renderSkeldFrame(ctx, canvas, state) {
   const staticShip = buildStaticSkeldCanvas();
 
   ctx.save();
-  let zoom = 1, camX = state.myPlayer.x, camY = state.myPlayer.y;
+  const px = Number.isFinite(state.myPlayer?.x) ? state.myPlayer.x : 1540;
+  const py = Number.isFinite(state.myPlayer?.y) ? state.myPlayer.y : 340;
+  let zoom = 1, camX = px, camY = py;
   if (state.viewMode === 'full') {
     zoom = Math.min(w / CONFIG.MAP_WIDTH, h / CONFIG.MAP_HEIGHT) * 0.96;
     camX = CONFIG.MAP_WIDTH / 2;
@@ -370,6 +373,23 @@ export function renderSkeldFrame(ctx, canvas, state) {
   ctx.lineWidth = 3;
   ctx.beginPath(); ctx.arc(960, 620, 32, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
 
+  // Live Emergency Table indicator when nearby
+  if (state.nearEmergencyTable && !state.myPlayer.isDead && !state.myPlayer.inVent) {
+    const pulseTable = 0.5 + 0.5 * Math.sin(now * 0.006);
+    ctx.save();
+    ctx.strokeStyle = `rgba(239, 68, 68, ${0.45 + pulseTable * 0.45})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(1540, 340, 76 + pulseTable * 8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ef4444';
+    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('🚨 EMERGENCY TABLE [E]', 1540, 340 - 80);
+    ctx.restore();
+  }
+
   // Stations & Sabotage
   drawStationsAndSabotage(ctx, state, time);
 
@@ -386,7 +406,9 @@ export function renderSkeldFrame(ctx, canvas, state) {
         ctx.save();
         ctx.strokeStyle = state.myPlayer.inVent ? '#facc15' : '#06b6d4';
         ctx.lineWidth = 3.5;
-        ctx.beginPath(); ctx.roundRect(vent.x - 25, vent.y - 19, 50, 38, 7); ctx.stroke();
+        ctx.beginPath();
+        drawRoundRect(ctx, vent.x - 25, vent.y - 19, 50, 38, 7);
+        ctx.stroke();
         ctx.font = 'bold 11px "Segoe UI", sans-serif';
         ctx.fillStyle = state.myPlayer.inVent ? '#fef08a' : '#67e8f9';
         ctx.textAlign = 'center';
@@ -396,7 +418,7 @@ export function renderSkeldFrame(ctx, canvas, state) {
     }
 
     state.deadBodies.forEach(body => {
-      if (Math.hypot(body.x - state.myPlayer.x, body.y - state.myPlayer.y) <= visionRadius + 24) {
+      if (Math.hypot(body.x - px, body.y - py) <= visionRadius + 24) {
         drawDeadBody(ctx, body);
       }
     });
@@ -404,16 +426,18 @@ export function renderSkeldFrame(ctx, canvas, state) {
     const drawList = [];
     state.players.forEach(p => {
       if (p.inVent) return;
-      if (Math.hypot(p.x - state.myPlayer.x, p.y - state.myPlayer.y) <= visionRadius + 24) {
+      if (Math.hypot(p.x - px, p.y - py) <= visionRadius + 24) {
         drawList.push({ data: p, isMe: false, y: p.y });
       }
     });
-    if (!state.myPlayer.inVent) drawList.push({ data: state.myPlayer, isMe: true, y: state.myPlayer.y });
+    if (!state.myPlayer.inVent) drawList.push({ data: state.myPlayer, isMe: true, y: py });
     drawList.sort((a, b) => a.y - b.y);
     drawList.forEach(item => drawCrewmate(ctx, item.data, item.isMe, time));
 
-    if (Number.isFinite(visionRadius)) {
-      const fogGrad = ctx.createRadialGradient(state.myPlayer.x, state.myPlayer.y, Math.max(20, visionRadius * 0.58), state.myPlayer.x, state.myPlayer.y, visionRadius);
+    if (Number.isFinite(visionRadius) && visionRadius > 30) {
+      const r0 = Math.max(20, visionRadius * 0.55);
+      const r1 = Math.max(r0 + 10, visionRadius);
+      const fogGrad = ctx.createRadialGradient(px, py, r0, px, py, r1);
       fogGrad.addColorStop(0, 'rgba(3, 6, 14, 0)');
       fogGrad.addColorStop(0.75, 'rgba(3, 6, 14, 0.55)');
       fogGrad.addColorStop(1, 'rgba(3, 6, 14, 0.94)');
@@ -435,10 +459,13 @@ export function renderSkeldFrame(ctx, canvas, state) {
 
 function drawStationsAndSabotage(ctx, state, time) {
   const isImp = String(state.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
+  const sec = state.settings?.questionSection || 1;
+  const assignedList = state.assignedTasks || [];
   state.stations.forEach(st => {
     const isNear = !isImp && state.currentStationNear && state.currentStationNear.id === st.id;
     const isSab = isStationSabotaged(st, state.activeSabotage);
-    const hasTask = !isImp && state.assignedTasks.includes(st.id) && !state.myPlayer.completedTasks.includes(st.id);
+    const isAssigned = assignedList.includes(st.id);
+    const hasTask = !isImp && isAssigned && getNextQuestionForStation(st.id, sec, state.myPlayer.completedTasks) !== null;
 
     ctx.save();
     if (isSab) {
@@ -495,27 +522,31 @@ function drawFullMapMarkers(ctx, state, time) {
       ctx.restore();
     });
   }
+  const sec = state.settings?.questionSection || 1;
+  const assignedList = state.assignedTasks || [];
+  const completedList = state.myPlayer.completedTasks || [];
+
   state.stations.forEach(st => {
-    const isAssigned = !isImp && state.assignedTasks.includes(st.id);
-    const isDone = state.myPlayer.completedTasks.includes(st.id);
     const isSab = isStationSabotaged(st, state.activeSabotage);
-    if (!isAssigned && !isSab) return;
+    const isAssigned = assignedList.includes(st.id);
+    const hasActiveTask = !isImp && isAssigned && getNextQuestionForStation(st.id, sec, completedList) !== null;
+
     ctx.save();
     if (isSab) {
       ctx.fillStyle = 'rgba(239, 68, 68, 0.95)'; ctx.strokeStyle = '#fef08a'; ctx.lineWidth = 5;
       ctx.beginPath(); ctx.arc(st.x, st.y, 44 + pulse, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       ctx.fillStyle = '#ffffff'; ctx.font = '900 34px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('⚠️', st.x, st.y);
-    } else if (!isDone) {
+    } else if (hasActiveTask) {
+      // ONLY currently assigned wave tasks show the prominent exclamation marker!
       ctx.fillStyle = 'rgba(250, 204, 21, 0.95)'; ctx.strokeStyle = '#090c12'; ctx.lineWidth = 5;
       ctx.beginPath(); ctx.arc(st.x, st.y, 38 + pulse * 0.6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       ctx.fillStyle = '#090c12'; ctx.font = '900 40px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('!', st.x, st.y + 2);
-    } else {
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.9)'; ctx.strokeStyle = '#090c12'; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.arc(st.x, st.y, 26, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#ffffff'; ctx.font = '900 28px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('✓', st.x, st.y + 1);
+    } else if (!isImp) {
+      // Unassigned station: show clean subtle station dot
+      ctx.fillStyle = 'rgba(30, 41, 59, 0.6)'; ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(st.x, st.y, 16, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     }
     ctx.restore();
   });
@@ -536,11 +567,13 @@ function drawSelfMapPin(ctx, state, time) {
 function drawSabotageArrow(ctx, state) {
   const sabTarget = state.stations.find(s => isStationSabotaged(s, state.activeSabotage));
   if (!sabTarget) return;
-  const dx = sabTarget.x - state.myPlayer.x, dy = sabTarget.y - state.myPlayer.y;
+  const px = Number.isFinite(state.myPlayer?.x) ? state.myPlayer.x : 1540;
+  const py = Number.isFinite(state.myPlayer?.y) ? state.myPlayer.y : 340;
+  const dx = sabTarget.x - px, dy = sabTarget.y - py;
   if (Math.hypot(dx, dy) < 150) return;
   const angle = Math.atan2(dy, dx);
   ctx.save();
-  ctx.translate(state.myPlayer.x + Math.cos(angle) * 78, state.myPlayer.y + Math.sin(angle) * 78);
+  ctx.translate(px + Math.cos(angle) * 78, py + Math.sin(angle) * 78);
   ctx.rotate(angle);
   ctx.fillStyle = '#ef4444'; ctx.strokeStyle = '#fef08a'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(16, 0); ctx.lineTo(-10, -11); ctx.lineTo(-5, 0); ctx.lineTo(-10, 11); ctx.closePath();
@@ -552,6 +585,8 @@ function drawCornerRadar(ctx, w, h, state, time) {
   const rw = Math.min(186, w * 0.28);
   const rh = rw * (CONFIG.MAP_HEIGHT / CONFIG.MAP_WIDTH);
   const rx = 14, ry = 60, sx = rw / CONFIG.MAP_WIDTH, sy = rh / CONFIG.MAP_HEIGHT;
+  const px = Number.isFinite(state.myPlayer?.x) ? state.myPlayer.x : 1540;
+  const py = Number.isFinite(state.myPlayer?.y) ? state.myPlayer.y : 340;
 
   ctx.save();
   fillStrokeRoundRect(ctx, rx, ry, rw, rh, 8, 'rgba(8, 15, 28, 0.84)', 'rgba(56, 189, 248, 0.48)', 1.5);
@@ -560,17 +595,19 @@ function drawCornerRadar(ctx, w, h, state, time) {
     ctx.fillRect(rx + r.x * SKELD_TILE_SIZE * sx, ry + r.y * SKELD_TILE_SIZE * sy, r.w * SKELD_TILE_SIZE * sx, r.h * SKELD_TILE_SIZE * sy);
   });
   const isImp = String(state.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
+  const sec = state.settings?.questionSection || 1;
+  const assignedList = state.assignedTasks || [];
   state.stations.forEach(st => {
     if (isStationSabotaged(st, state.activeSabotage)) {
       ctx.fillStyle = Math.sin(time * 8) > 0 ? '#ef4444' : '#facc15';
       ctx.beginPath(); ctx.arc(rx + st.x * sx, ry + st.y * sy, 4.5, 0, Math.PI * 2); ctx.fill();
-    } else if (!isImp && state.assignedTasks.includes(st.id) && !state.myPlayer.completedTasks.includes(st.id)) {
+    } else if (!isImp && assignedList.includes(st.id) && getNextQuestionForStation(st.id, sec, state.myPlayer.completedTasks) !== null) {
       ctx.fillStyle = '#facc15';
-      ctx.beginPath(); ctx.arc(rx + st.x * sx, ry + st.y * sy, 2.8, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(rx + st.x * sx, ry + st.y * sy, 3.2, 0, Math.PI * 2); ctx.fill();
     }
   });
   ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(rx + state.myPlayer.x * sx, ry + state.myPlayer.y * sy, 3.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(rx + px * sx, ry + py * sy, 3.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   ctx.font = 'bold 8px sans-serif'; ctx.fillStyle = '#7dd3fc'; ctx.textAlign = 'left';
   ctx.fillText('THE SKELD', rx + 6, ry + 11);
   ctx.restore();
@@ -580,7 +617,7 @@ function drawFullMapChecklist(ctx, state) {
   const isImp = String(state.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
   if (isImp) {
     ctx.save();
-    fillStrokeRoundRect(ctx, 16, 64, 210, 52, 10, 'rgba(9, 14, 26, 0.9)', 'rgba(239, 68, 68, 0.55)', 1.5);
+    fillStrokeRoundRect(ctx, 16, 64, 220, 52, 10, 'rgba(9, 14, 26, 0.9)', 'rgba(239, 68, 68, 0.55)', 1.5);
     ctx.font = '900 11px "Segoe UI", sans-serif'; ctx.fillStyle = '#fca5a5'; ctx.textAlign = 'left';
     ctx.fillText('🔪 IMPOSTOR SHIP MAP', 28, 86);
     ctx.font = '600 11px "Segoe UI", sans-serif'; ctx.fillStyle = '#cbd5e1';
@@ -588,25 +625,42 @@ function drawFullMapChecklist(ctx, state) {
     ctx.restore();
     return;
   }
-  const assigned = state.assignedTasks || [];
+  const sec = state.settings?.questionSection || 1;
   const completed = state.myPlayer.completedTasks || [];
-  const items = assigned.map(id => {
-    const st = state.stations.find(s => s.id === id);
-    return { name: st ? st.name : id, done: completed.includes(id) };
+  const assignedList = state.assignedTasks || [];
+  const waveSec = Math.max(0, Math.ceil(state.taskRefreshTimeLeft || 0));
+  const wMm = Math.floor(waveSec / 60);
+  const wSs = String(waveSec % 60).padStart(2, '0');
+
+  // Wave items: only the stations assigned in this wave!
+  const waveItems = assignedList.map(stId => {
+    const stationObj = state.stations.find(s => s.id === stId);
+    const hasRemaining = getNextQuestionForStation(stId, sec, completed) !== null;
+    return {
+      id: stId,
+      name: stationObj ? stationObj.name : stId,
+      done: !hasRemaining
+    };
   });
-  const boxX = 16, boxY = 64, rowH = 22, boxW = 220, boxH = 44 + Math.max(1, items.length) * rowH;
+
+  const boxX = 16, boxY = 64, rowH = 22, boxW = 240;
+  const boxH = 68 + Math.max(1, waveItems.length) * rowH;
   ctx.save();
-  fillStrokeRoundRect(ctx, boxX, boxY, boxW, boxH, 10, 'rgba(9, 14, 26, 0.9)', 'rgba(56, 189, 248, 0.5)', 1.5);
+  fillStrokeRoundRect(ctx, boxX, boxY, boxW, boxH, 10, 'rgba(9, 14, 26, 0.92)', 'rgba(56, 189, 248, 0.55)', 1.5);
   ctx.font = '900 11px "Segoe UI", sans-serif'; ctx.fillStyle = '#7dd3fc'; ctx.textAlign = 'left';
-  ctx.fillText('📋 REMAINING TASKS', boxX + 12, boxY + 22);
-  if (items.length === 0) {
-    ctx.font = '700 12px "Segoe UI", sans-serif'; ctx.fillStyle = '#94a3b8';
-    ctx.fillText('Waiting for next wave...', boxX + 12, boxY + 46);
+  ctx.fillText(`📋 SECTION ${sec} PROGRESS (${completed.length}/25)`, boxX + 12, boxY + 22);
+
+  ctx.font = '700 10px "Segoe UI", sans-serif'; ctx.fillStyle = '#94a3b8';
+  ctx.fillText(`🌊 CURRENT WAVE (${waveItems.length} TASKS) • Next: ${wMm}:${wSs}`, boxX + 12, boxY + 38);
+
+  if (waveItems.length === 0) {
+    ctx.font = 'italic 11px "Segoe UI", sans-serif'; ctx.fillStyle = '#4ade80';
+    ctx.fillText('🎉 Wave complete! Next wave incoming...', boxX + 12, boxY + 58);
   } else {
-    items.forEach((item, idx) => {
-      ctx.font = '700 12px "Segoe UI", sans-serif';
+    waveItems.forEach((item, idx) => {
+      ctx.font = '700 11px "Segoe UI", sans-serif';
       ctx.fillStyle = item.done ? '#4ade80' : '#facc15';
-      ctx.fillText(`${item.done ? '✅' : '⭐'} ${item.name}`, boxX + 12, boxY + 46 + idx * rowH);
+      ctx.fillText(`${item.done ? '✅' : '⭐'} ${item.name}`, boxX + 12, boxY + 58 + idx * rowH);
     });
   }
   ctx.restore();

@@ -10,6 +10,8 @@ export default function ActionButtons({
   nearStation,
   nearSabotage,
   nearBody,
+  nearEmergencyTable,
+  canKillTarget,
   killCooldown,
   onVote,
   onReport,
@@ -50,19 +52,29 @@ export default function ActionButtons({
       {/* Bottom-Right Action Buttons */}
       <div id="actionHud">
         <div className="action-row">
-          <button className="btn-action btn-vote" onClick={onVote}>
-            <span className="icon">🚨</span>
-            <span>VOTE</span>
-          </button>
+          {/* Emergency Meeting button — ONLY available when near the Cafeteria emergency table */}
+          {nearEmergencyTable && !isDead && !inVent && (
+            <button
+              className="btn-action btn-vote available"
+              style={{ display: 'flex' }}
+              onClick={onVote}
+              title="Call Emergency Meeting [E]"
+            >
+              <span className="icon">🚨</span>
+              <span>MEETING [E]</span>
+            </button>
+          )}
 
+          {/* Report Dead Body — ONLY available when standing near a dead body */}
           {nearBody && !isDead && (
             <button
-              className="btn-action btn-report"
+              className="btn-action btn-report available"
               style={{ display: 'flex' }}
               onClick={onReport}
+              title="Report Dead Body [R]"
             >
               <span className="icon">📢</span>
-              <span>REPORT</span>
+              <span>REPORT [R]</span>
             </button>
           )}
 
@@ -75,19 +87,21 @@ export default function ActionButtons({
                 style={{ display: 'flex' }}
                 disabled={!inVent && !nearVent}
                 onClick={onToggleVent}
+                title="Vent [V]"
               >
                 <span className="icon">{inVent ? '🚪' : '🕳️'}</span>
-                <span>{inVent ? 'EXIT' : 'VENT'}</span>
+                <span>{inVent ? 'EXIT [V]' : 'VENT [V]'}</span>
               </button>
 
               <button
-                className="btn-action btn-kill"
+                className={`btn-action btn-kill ${canKillTarget ? 'available' : ''}`}
                 style={{ display: 'flex' }}
                 disabled={killCooldown > 0 || isDead || inVent}
                 onClick={onKill}
+                title="Eliminate Crewmate [Q]"
               >
                 <span className="icon">🔪</span>
-                <span>KILL</span>
+                <span>KILL [Q]</span>
                 {killCooldown > 0 && (
                   <div className="cooldown-overlay" style={{ display: 'flex' }}>
                     {Math.ceil(killCooldown)}s
@@ -100,10 +114,23 @@ export default function ActionButtons({
                 style={{ display: 'flex' }}
                 disabled={isDead}
                 onClick={onSabotage}
+                title="Open Sabotage Map"
               >
                 <span className="icon">⚡</span>
                 <span>SABOTAGE</span>
               </button>
+
+              {nearSabotage && (
+                <button
+                  className="btn-action btn-task available sabotage-mode"
+                  style={{ display: 'flex' }}
+                  onClick={onTaskOrFix}
+                  title="Fix Sabotage [E] (0 pts)"
+                >
+                  <span className="icon">🔧</span>
+                  <span>FIX [E]</span>
+                </button>
+              )}
             </>
           )}
 
@@ -114,9 +141,10 @@ export default function ActionButtons({
               }`}
               disabled={!nearStation}
               onClick={onTaskOrFix}
+              title={nearSabotage ? 'Fix Sabotage [E]' : 'Complete Task [E]'}
             >
               <span className="icon">{nearSabotage ? '🔧' : '⚙️'}</span>
-              <span>{nearSabotage ? 'FIX' : 'TASK'}</span>
+              <span>{nearSabotage ? 'FIX [E]' : 'TASK [E]'}</span>
             </button>
           )}
         </div>

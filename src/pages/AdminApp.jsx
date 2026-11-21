@@ -16,7 +16,9 @@ import { QrModal, GameOverModal } from '../components/admin/AdminModals.jsx';
 
 const DEFAULT_SETTINGS = {
   impostorsCount: 1,
-  tasksPerPlayer: 3,
+  questionSection: 1,
+  gameDuration: 900,
+  tasksPerPlayer: 25,
   killCooldown: 30,
   respawnTime: 45,
   roleRotation: 180,
@@ -167,6 +169,10 @@ export default function AdminApp() {
 
         if (data.type === 'LOBBY_CREATED') {
           setQrVersion(Date.now());
+          if (data.lobbyCode) {
+            setLobbyCode(data.lobbyCode);
+            selectedCodeRef.current = data.lobbyCode;
+          }
           addLog(`🏠 New Lobby Created! Share code: ${data.lobbyCode}`, 'info');
           return;
         }
@@ -368,10 +374,8 @@ export default function AdminApp() {
           settings={settings}
           onChangeSetting={(key, value) => {
             setSettings((prev) => ({ ...prev, [key]: value }));
-            if (lobbyCode) {
-              sendAdminCmd('setting', { key, setting: key, value });
-              addLog(`[${lobbyCode}] Setting updated: ${key} = ${value}`, 'info');
-            }
+            sendAdminCmd('setting', { key, setting: key, value, lobbyCode });
+            addLog(`[${lobbyCode || 'All'}] Setting updated: ${key} = ${value}`, 'info');
           }}
         />
 

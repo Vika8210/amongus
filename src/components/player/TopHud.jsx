@@ -1,10 +1,18 @@
 import React from 'react';
 
+function fmtTimer(secs) {
+  const s = Math.max(0, Math.ceil(secs || 0));
+  const mm = Math.floor(s / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
 export default function TopHud({
   score,
   role,
   completedCount,
   totalTasks,
+  matchTimeLeft,
   waveTimeLeft,
   viewMode,
   activeSabotage,
@@ -14,10 +22,9 @@ export default function TopHud({
   onSabotageBannerClick
 }) {
   const isImp = String(role || 'CREWMATE').toUpperCase() === 'IMPOSTOR';
-  const pct = Math.min(100, (completedCount / Math.max(1, totalTasks)) * 100);
-  const secs = Math.max(0, Math.ceil(waveTimeLeft || 0));
-  const mm = Math.floor(secs / 60);
-  const ss = String(secs % 60).padStart(2, '0');
+  const pct = Math.min(100, (completedCount / Math.max(1, totalTasks || 25)) * 100);
+  const matchStr = fmtTimer(matchTimeLeft);
+  const waveStr = fmtTimer(waveTimeLeft);
   const sabName = activeSabotage ? String(activeSabotage.building || 'SYSTEM').toUpperCase() : '';
 
   return (
@@ -32,24 +39,30 @@ export default function TopHud({
           {isImp ? 'IMPOSTOR 🔪' : 'CREWMATE'}
         </div>
 
+        {/* Global Match Clock */}
+        <div className="hud-pill" title="Match Countdown Timer">
+          <span style={{ color: '#38bdf8', fontWeight: 800 }}>⏱️ {matchStr}</span>
+        </div>
+
+        {/* Crewmate Tasks & Wave Timer */}
         {!isImp && (
           <div className="hud-pill">
             <span>
-              Tasks: {completedCount}/{totalTasks || 3}
+              Tasks: {completedCount}/{totalTasks || 25}
             </span>
             <div className="tasks-progress-mini">
               <div className="tasks-progress-fill" style={{ width: `${pct}%` }} />
             </div>
             <span
               style={{
-                marginLeft: '4px',
-                color: '#7dd3fc',
+                marginLeft: '6px',
+                color: '#facc15',
                 fontSize: '11px',
-                fontWeight: 800
+                fontWeight: 700
               }}
-              title="Time until 3 fresh random tasks"
+              title="Next 2-Minute Task Wave"
             >
-              ⏱️ {mm}:{ss}
+              🌊 Wave: {waveStr}
             </span>
           </div>
         )}

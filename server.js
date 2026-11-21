@@ -18,6 +18,7 @@ const os = require('os');
 const express = require('express');
 const WebSocket = require('ws');
 const QRCode = require('qrcode');
+const { getRemainingStationsForPlayer } = require('./src/game/taskCatalog.js');
 
 // ----------------------------------------------------------------------------
 // 1. Original The Skeld Spaceship 14 Rooms (Map size: 2800 x 1680 px)
@@ -48,13 +49,15 @@ const COLORS = [
 const DEFAULT_SETTINGS = {
   maxImpostors: 1,
   impostorsCount: 1,
+  questionSection: 1,      // 1: Q1-Q25, 2: Q26-Q50, 3: Q51-Q75
+  gameDuration: 600,        // 10 minutes (600 seconds)
   killCooldown: 30,
   respawnTime: 45,
   roleRotationInterval: 180,
   roleRotation: 180,
   votingTime: 60,
   votingDuration: 60,
-  tasksPerPlayer: 3,
+  tasksPerPlayer: 3,        // 3 tasks per 2-minute wave
   crewVision: 150,
   crewVisionRadius: 150,
   impVision: 250,
@@ -67,6 +70,8 @@ const DEFAULT_SETTINGS = {
 const SETTING_KEY_MAP = {
   maxImpostors: 'maxImpostors',
   impostorsCount: 'maxImpostors',
+  questionSection: 'questionSection',
+  gameDuration: 'gameDuration',
   killCooldown: 'killCooldown',
   respawnTime: 'respawnTime',
   roleRotation: 'roleRotationInterval',
@@ -118,7 +123,10 @@ function createLobby(customCode = '') {
     roleRotationTimer: null,
     roleRotationTimeLeft: 0,
     taskRefreshTimer: null,
-    taskRefreshTimeLeft: 120,    // 2 minutes between 3-task waves
+    taskRefreshTimeLeft: 120,
+    gameLoopTimer: null,
+    gameTimeLeft: 900,           // 15-minute game countdown (900 seconds)
+    gameDuration: 900,
     deadBodies: [],
     meeting: null,
     sabotages: {},
@@ -168,6 +176,7 @@ function clearLobbyTimers(lobby) {
   if (lobby.votingTimer) { clearInterval(lobby.votingTimer); lobby.votingTimer = null; }
   if (lobby.roleRotationTimer) { clearInterval(lobby.roleRotationTimer); lobby.roleRotationTimer = null; }
   if (lobby.taskRefreshTimer) { clearInterval(lobby.taskRefreshTimer); lobby.taskRefreshTimer = null; }
+  if (lobby.gameLoopTimer) { clearInterval(lobby.gameLoopTimer); lobby.gameLoopTimer = null; }
   if (lobby.sabotageTimeout) { clearTimeout(lobby.sabotageTimeout); lobby.sabotageTimeout = null; }
 }
 
@@ -181,6 +190,15 @@ function lobbyLog(lobby, msg) {
 function pickRandomTasks(count) {
   const roomIds = Object.keys(BUILDINGS);
   const shuffled = [...roomIds].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, Math.min(count, shuffled.length));
+}
+
+function pickWaveTasksForPlayer(player, lobby) {
+  const count = Math.max(1, Math.min(14, lobby.settings.tasksPerPlayer || 3));
+  const sec = lobby.settings.questionSection || 1;
+  const remaining = getRemainingStationsForPlayer(sec, player.tasksCompleted || []);
+  if (!remaining || remaining.length === 0) return [];
+  const shuffled = [...remaining].sort(() => 0.5 - Math.random());
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
@@ -338,6 +356,9 @@ function serializeState(lobby, recipientId = null, isAdmin = false) {
     votingTimeLeft: lobby.votingTimeLeft,
     roleRotationTimeLeft: lobby.roleRotationTimeLeft,
     taskRefreshTimeLeft: lobby.taskRefreshTimeLeft,
+    gameTimeLeft: lobby.gameTimeLeft ?? (lobby.settings.gameDuration || 900),
+    gameDuration: lobby.settings.gameDuration || 900,
+    questionSection: lobby.settings.questionSection || 1,
     deadBodies: lobby.deadBodies,
     meeting: lobby.meeting,
     sabotages: lobby.sabotages,
@@ -444,6 +465,7 @@ setInterval(() => {
       type: 'PLAYER_UPDATE',
       lobbyCode: lobby.code,
       taskRefreshTimeLeft: lobby.taskRefreshTimeLeft,
+      gameTimeLeft: lobby.gameTimeLeft ?? (lobby.settings.gameDuration || 900),
       players: positions
     });
 
@@ -500,9 +522,32 @@ setInterval(() => {
 // 6. Per-Lobby Game Engine Operations
 // ----------------------------------------------------------------------------
 
+function startGameTimer(lobby) {
+  if (lobby.gameLoopTimer) clearInterval(lobby.gameLoopTimer);
+  lobby.gameDuration = lobby.settings.gameDuration || 900;
+  lobby.gameTimeLeft = lobby.gameDuration;
+
+  lobby.gameLoopTimer = setInterval(() => {
+    if (lobby.phase !== 'PLAYING' && lobby.phase !== 'VOTING') return;
+    lobby.gameTimeLeft--;
+    if (lobby.gameTimeLeft <= 0) {
+      clearInterval(lobby.gameLoopTimer);
+      lobby.gameLoopTimer = null;
+      // 15-Minute timer expired!
+      const crew = Object.values(lobby.players).filter(p => p.role === 'crewmate');
+      const allDone = crew.length > 0 && crew.every(p => p.tasksCompleted.length >= 25);
+      if (allDone) {
+        endGame(lobby, 'crewmate', '15-Minute Timer Expired — Crewmates completed all 25 questions!');
+      } else {
+        endGame(lobby, 'impostor', '15-Minute Timer Expired — Crewmates could not solve all 25 questions in time!');
+      }
+    }
+  }, 1000);
+}
+
 function startTaskRefreshTimer(lobby) {
   if (lobby.taskRefreshTimer) clearInterval(lobby.taskRefreshTimer);
-  lobby.taskRefreshTimeLeft = 120; // 2 minutes
+  lobby.taskRefreshTimeLeft = 120;
 
   lobby.taskRefreshTimer = setInterval(() => {
     if (lobby.phase !== 'PLAYING') return;
@@ -515,22 +560,25 @@ function startTaskRefreshTimer(lobby) {
 }
 
 function assignFreshTasksToCrew(lobby) {
-  const count = lobby.settings.tasksPerPlayer || 3;
+  if (lobby.phase !== 'PLAYING') return;
+
+  // Never wipe completed tasks! All 25 questions remain cumulative and non-repeating.
   Object.values(lobby.players).forEach(p => {
     if (p.role === 'crewmate') {
-      p.tasksAssigned = pickRandomTasks(count);
-      p.tasksCompleted = [];
+      const newWave = pickWaveTasksForPlayer(p, lobby);
+      p.tasksAssigned = newWave;
       sendToPlayer(lobby, p.id, {
         type: 'NEW_TASKS',
-        tasks: p.tasksAssigned.map(tId => getTaskPublicInfo(tId))
+        tasks: newWave.map(tId => getTaskPublicInfo(tId)),
+        waveTimeLeft: 120
       });
     } else {
       p.tasksAssigned = [];
-      p.tasksCompleted = [];
     }
   });
-  lobbyLog(lobby, `📋 2-Minute Task Wave: Assigned ${count} new random tasks to all Crewmates.`);
-  broadcastNotification(lobby, `📋 New Task Wave! All Crewmates received ${count} fresh random tasks!`, '#38bdf8');
+
+  lobbyLog(lobby, '🌊 2-Minute Task Wave: assigned new tasks to crewmates from remaining questions.');
+  broadcastNotification(lobby, '🌊 2-Min Wave: New tasks assigned from your remaining questions!', '#38bdf8');
   broadcastGameState(lobby);
   broadcastAllAdmins(lobby.code);
 }
@@ -559,16 +607,19 @@ function rotateRoles(lobby) {
 
   const currentImpostors = allPlayers.filter(p => p.role === 'impostor');
 
-  // Reset current impostors to crewmates with 3 random tasks
+  // Reset current impostors to crewmates with wave tasks from remaining questions
   currentImpostors.forEach(imp => {
     imp.role = 'crewmate';
     imp.inVent = false;
-    imp.tasksAssigned = pickRandomTasks(lobby.settings.tasksPerPlayer || 3);
-    imp.tasksCompleted = [];
+    imp.tasksAssigned = pickWaveTasksForPlayer(imp, lobby);
+    // Note: Cumulative completed tasks are preserved! Solved questions never repeat.
     sendToPlayer(lobby, imp.id, {
       type: 'ROLE_ASSIGN',
       role: 'crewmate',
-      tasks: imp.tasksAssigned.map(tId => getTaskPublicInfo(tId))
+      tasks: imp.tasksAssigned.map(tId => getTaskPublicInfo(tId)),
+      section: lobby.settings.questionSection || 1,
+      gameDuration: lobby.gameDuration,
+      gameTimeLeft: lobby.gameTimeLeft
     });
   });
 
@@ -582,13 +633,15 @@ function rotateRoles(lobby) {
     newImp.role = 'impostor';
     newImp.inVent = false;
     newImp.tasksAssigned = [];
-    newImp.tasksCompleted = [];
     newImp.killCooldownLeft = lobby.settings.killCooldown || 30;
     newImp.lastKillTime = Date.now();
     sendToPlayer(lobby, newImp.id, {
       type: 'ROLE_ASSIGN',
       role: 'impostor',
-      tasks: []
+      tasks: [],
+      section: lobby.settings.questionSection || 1,
+      gameDuration: lobby.gameDuration,
+      gameTimeLeft: lobby.gameTimeLeft
     });
   });
 
@@ -672,7 +725,8 @@ function startGame(lobby) {
   }
 
   activePlayers.forEach((p, index) => {
-    p.tasksAssigned = p.role === 'crewmate' ? pickRandomTasks(lobby.settings.tasksPerPlayer || 3) : [];
+    p.tasksCompleted = [];
+    p.tasksAssigned = p.role === 'crewmate' ? pickWaveTasksForPlayer(p, lobby) : [];
     const angle = (index / Math.max(1, activePlayers.length)) * Math.PI * 2;
     p.x = Math.round(1540 + Math.cos(angle) * 112);
     p.y = Math.round(340 + Math.sin(angle) * 112);
@@ -681,6 +735,9 @@ function startGame(lobby) {
   clearLobbyTimers(lobby);
   lobby.phase = 'PLAYING';
   lobby.startTime = Date.now();
+  lobby.gameDuration = lobby.settings.gameDuration || 600;
+  lobby.gameTimeLeft = lobby.gameDuration;
+  lobby.taskRefreshTimeLeft = 120;
   lobby.sabotages = {};
   lobby.activeSabotage = null;
   lobby.deadBodies = [];
@@ -691,17 +748,23 @@ function startGame(lobby) {
     sendToPlayer(lobby, p.id, {
       type: 'ROLE_ASSIGN',
       role: p.role,
-      tasks: p.role === 'crewmate' ? p.tasksAssigned.map(tId => getTaskPublicInfo(tId)) : []
+      tasks: p.role === 'crewmate' ? p.tasksAssigned.map(tId => getTaskPublicInfo(tId)) : [],
+      section: lobby.settings.questionSection || 1,
+      gameDuration: lobby.gameDuration,
+      gameTimeLeft: lobby.gameTimeLeft
     });
   });
 
-  startRoleRotationTimer(lobby);
+  startGameTimer(lobby);
   startTaskRefreshTimer(lobby);
+  startRoleRotationTimer(lobby);
 
   const impNames = activePlayers.filter(p => p.role === 'impostor').map(p => p.name).join(', ');
   const crewNames = activePlayers.filter(p => p.role === 'crewmate').map(p => p.name).join(', ');
-  lobbyLog(lobby, `▶ Game started (${activePlayers.length} players). Impostors(${numImpostors}): [${impNames}] | Crew: [${crewNames}]`);
-  broadcastNotification(lobby, 'Game Started! Complete 3 tasks within 20s each. New tasks every 2 min!', '#22c55e');
+  const curSection = lobby.settings.questionSection || 1;
+  const durMin = Math.round(lobby.gameDuration / 60);
+  lobbyLog(lobby, `▶ Game started (${activePlayers.length} players). Impostors(${numImpostors}): [${impNames}] | Crew: [${crewNames}] | Section: ${curSection} (${durMin}m timer, 2m wave refresh)`);
+  broadcastNotification(lobby, `🚀 Game Started! Section ${curSection} (25 C Questions) • ${durMin} Minutes • 2-Min Task Waves!`, '#22c55e');
 
   broadcastGameState(lobby);
   broadcastAllAdmins(lobby.code);
@@ -714,6 +777,7 @@ function resetGame(lobby) {
   lobby.votingTimeLeft = 0;
   lobby.roleRotationTimeLeft = 0;
   lobby.taskRefreshTimeLeft = 120;
+  lobby.gameTimeLeft = lobby.settings.gameDuration || 900;
   lobby.meeting = null;
   lobby.sabotages = {};
   lobby.activeSabotage = null;
@@ -824,12 +888,14 @@ function resolveVoting(lobby) {
           }
         }
         target.role = 'crewmate';
-        target.tasksAssigned = pickRandomTasks(lobby.settings.tasksPerPlayer || 3);
-        target.tasksCompleted = [];
+        target.tasksAssigned = pickWaveTasksForPlayer(target, lobby);
         sendToPlayer(lobby, target.id, {
           type: 'ROLE_ASSIGN',
           role: 'crewmate',
-          tasks: target.tasksAssigned.map(tId => getTaskPublicInfo(tId))
+          tasks: target.tasksAssigned.map(tId => getTaskPublicInfo(tId)),
+          section: lobby.settings.questionSection || 1,
+          gameDuration: lobby.gameDuration,
+          gameTimeLeft: lobby.gameTimeLeft
         });
 
         const aliveCrew = Object.values(lobby.players).filter(p => p.role === 'crewmate' && !p.isDead && p.id !== target.id);
@@ -837,9 +903,16 @@ function resolveVoting(lobby) {
           const newImp = aliveCrew[Math.floor(Math.random() * aliveCrew.length)];
           newImp.role = 'impostor';
           newImp.tasksAssigned = [];
-          newImp.tasksCompleted = [];
           newImp.killCooldownLeft = lobby.settings.killCooldown || 30;
-          sendToPlayer(lobby, newImp.id, { type: 'ROLE_ASSIGN', role: 'impostor', tasks: [] });
+          newImp.lastKillTime = Date.now();
+          sendToPlayer(lobby, newImp.id, {
+            type: 'ROLE_ASSIGN',
+            role: 'impostor',
+            tasks: [],
+            section: lobby.settings.questionSection || 1,
+            gameDuration: lobby.gameDuration,
+            gameTimeLeft: lobby.gameTimeLeft
+          });
         }
         lobbyLog(lobby, `✅ Impostor ${target.name} ejected!`);
         broadcastNotification(lobby, `🎉 ${target.name} was an IMPOSTOR! (+20 pts to voters)`, '#22c55e');
@@ -986,7 +1059,7 @@ function handleMessage(ws, socketId, msg) {
       score: prevSession ? prevSession.score : 0,
       tasksAssigned: prevSession
         ? prevSession.tasksAssigned
-        : (lobby.phase === 'PLAYING' ? pickRandomTasks(lobby.settings.tasksPerPlayer || 3) : []),
+        : (lobby.phase === 'PLAYING' ? pickWaveTasksForPlayer({ tasksCompleted: [] }, lobby) : []),
       tasksCompleted: prevSession ? prevSession.tasksCompleted : [],
       killCooldownLeft: prevSession ? prevSession.killCooldownLeft : 0,
       lastKillTime: prevSession ? prevSession.lastKillTime : 0,
@@ -1010,7 +1083,10 @@ function handleMessage(ws, socketId, msg) {
       sendToPlayer(lobby, socketId, {
         type: 'ROLE_ASSIGN',
         role: player.role,
-        tasks: player.tasksAssigned.map(tId => getTaskPublicInfo(tId))
+        tasks: player.tasksAssigned.map(tId => getTaskPublicInfo(tId)),
+        section: lobby.settings.questionSection || 1,
+        gameDuration: lobby.gameDuration,
+        gameTimeLeft: lobby.gameTimeLeft
       });
     }
 
@@ -1063,6 +1139,68 @@ function handleMessage(ws, socketId, msg) {
       return;
     }
 
+    if (cmd === 'setting') {
+      const canonicalKey = SETTING_KEY_MAP[key] || key;
+      const num = parseFloat(value);
+      if (Number.isFinite(num)) {
+        const finalVal = canonicalKey === 'maxImpostors' ? Math.max(1, Math.floor(num)) : num;
+        DEFAULT_SETTINGS[canonicalKey] = finalVal;
+        DEFAULT_SETTINGS[key] = finalVal;
+        if (canonicalKey === 'maxImpostors') DEFAULT_SETTINGS.impostorsCount = finalVal;
+        if (canonicalKey === 'roleRotationInterval') DEFAULT_SETTINGS.roleRotation = finalVal;
+        if (canonicalKey === 'votingDuration') DEFAULT_SETTINGS.votingTime = finalVal;
+        if (canonicalKey === 'crewVisionRadius') DEFAULT_SETTINGS.crewVision = finalVal;
+        if (canonicalKey === 'impostorVisionRadius') {
+          DEFAULT_SETTINGS.impVision = finalVal;
+          DEFAULT_SETTINGS.impostorVision = finalVal;
+        }
+        if (canonicalKey === 'playerSpeed') {
+          DEFAULT_SETTINGS.playerSpeed = finalVal;
+          DEFAULT_SETTINGS.moveSpeed = finalVal;
+        }
+        if (canonicalKey === 'questionSection') {
+          DEFAULT_SETTINGS.questionSection = Math.max(1, Math.min(3, Math.floor(finalVal)));
+        }
+        if (canonicalKey === 'gameDuration') {
+          DEFAULT_SETTINGS.gameDuration = Math.max(60, Math.floor(finalVal));
+        }
+
+        const targetCode = String(msg.lobbyCode || adminEntry?.selectedLobbyCode || '').trim().toUpperCase();
+        const specificLobby = targetCode ? lobbies.get(targetCode) : null;
+        const targetLobbies = specificLobby ? [specificLobby] : Array.from(lobbies.values());
+
+        targetLobbies.forEach(l => {
+          l.settings[canonicalKey] = finalVal;
+          l.settings[key] = finalVal;
+          if (canonicalKey === 'maxImpostors') l.settings.impostorsCount = finalVal;
+          if (canonicalKey === 'roleRotationInterval') l.settings.roleRotation = finalVal;
+          if (canonicalKey === 'votingDuration') l.settings.votingTime = finalVal;
+          if (canonicalKey === 'crewVisionRadius') l.settings.crewVision = finalVal;
+          if (canonicalKey === 'impostorVisionRadius') {
+            l.settings.impVision = finalVal;
+            l.settings.impostorVision = finalVal;
+          }
+          if (canonicalKey === 'playerSpeed') {
+            l.settings.playerSpeed = finalVal;
+            l.settings.moveSpeed = finalVal;
+          }
+          if (canonicalKey === 'questionSection') {
+            l.settings.questionSection = Math.max(1, Math.min(3, Math.floor(finalVal)));
+          }
+          if (canonicalKey === 'gameDuration') {
+            l.settings.gameDuration = Math.max(60, Math.floor(finalVal));
+            if (l.phase !== 'PLAYING') {
+              l.gameTimeLeft = l.settings.gameDuration;
+            }
+          }
+          lobbyLog(l, `Setting updated: ${key} = ${finalVal}`);
+          broadcastGameState(l);
+        });
+        broadcastAllAdmins();
+      }
+      return;
+    }
+
     // All remaining commands operate on the selected lobby
     const targetCode = String(msg.lobbyCode || adminEntry?.selectedLobbyCode || '').trim().toUpperCase();
     const lobby = lobbies.get(targetCode);
@@ -1075,29 +1213,6 @@ function handleMessage(ws, socketId, msg) {
       case 'reset':
         resetGame(lobby);
         break;
-      case 'setting': {
-        const canonicalKey = SETTING_KEY_MAP[key] || key;
-        const num = parseFloat(value);
-        if (Number.isFinite(num)) {
-          const finalVal = canonicalKey === 'maxImpostors' ? Math.max(1, Math.floor(num)) : num;
-          lobby.settings[canonicalKey] = finalVal;
-          lobby.settings[key] = finalVal;
-          if (canonicalKey === 'maxImpostors') lobby.settings.impostorsCount = finalVal;
-          if (canonicalKey === 'roleRotationInterval') lobby.settings.roleRotation = finalVal;
-          if (canonicalKey === 'votingDuration') lobby.settings.votingTime = finalVal;
-          if (canonicalKey === 'crewVisionRadius') lobby.settings.crewVision = finalVal;
-          if (canonicalKey === 'impostorVisionRadius') {
-            lobby.settings.impVision = finalVal;
-            lobby.settings.impostorVision = finalVal;
-          }
-          if (canonicalKey === 'playerSpeed') lobby.settings.moveSpeed = finalVal;
-
-          lobbyLog(lobby, `Setting updated: ${key} = ${finalVal}`);
-          broadcastGameState(lobby);
-          broadcastAllAdmins(lobby.code);
-        }
-        break;
-      }
       case 'broadcast': {
         const bText = String(value || msg.message || msg.text || '').trim();
         if (bText) {
@@ -1205,17 +1320,30 @@ function handleMessage(ws, socketId, msg) {
 
   if (type === 'TASK_COMPLETE') {
     if (lobby.phase !== 'PLAYING' || player.isDead || player.role === 'impostor') return;
-    const { taskId } = msg;
-    const roomObj = BUILDINGS[taskId];
-    if (!roomObj || player.tasksCompleted.includes(taskId)) return;
+    const { taskId, questionId } = msg;
+    const qKey = questionId || taskId;
+    if (!qKey || player.tasksCompleted.includes(qKey)) return;
 
     const pts = (typeof msg.points === 'number' && msg.points > 0) ? msg.points : 10;
-    player.tasksCompleted.push(taskId);
+    player.tasksCompleted.push(qKey);
     player.score += pts;
-    lobbyLog(lobby, `✅ ${player.name} solved task at ${roomObj.name}. (+${pts} pts, Total: ${player.score})`);
+    if (taskId) {
+      player.tasksAssigned = (player.tasksAssigned || []).filter(t => t !== taskId);
+    }
+    const roomName = BUILDINGS[taskId]?.name || taskId;
+    lobbyLog(lobby, `✅ ${player.name} solved question ${qKey} at ${roomName}. (+${pts} pts, Progress: ${player.tasksCompleted.length}/25, Total: ${player.score})`);
 
-    sendToPlayer(lobby, player.id, { type: 'TASK_RESULT', taskId, correct: true, points: pts });
-    broadcastToLobby(lobby, { type: 'POINTS_UPDATE', playerId: player.id, points: player.score, reason: `Completed Task (${roomObj.name})` });
+    sendToPlayer(lobby, player.id, { type: 'TASK_RESULT', taskId, questionId: qKey, correct: true, points: pts });
+    broadcastToLobby(lobby, { type: 'POINTS_UPDATE', playerId: player.id, points: player.score, reason: `Solved Task (${roomName})` });
+
+    // Check if crewmates have completed all 25 tasks
+    const crewPlayers = Object.values(lobby.players).filter(p => p.role === 'crewmate');
+    const allCrewFinished = crewPlayers.length > 0 && crewPlayers.every(p => p.tasksCompleted.length >= 25);
+    if (allCrewFinished) {
+      endGame(lobby, 'crewmate', '🏆 ALL 25 QUESTIONS SOLVED! Crewmates win by completing tasks!');
+      return;
+    }
+
     broadcastGameState(lobby);
     broadcastAllAdmins(lobby.code);
     return;
@@ -1254,12 +1382,18 @@ function handleMessage(ws, socketId, msg) {
       lobby.sabotages = {};
       if (lobby.sabotageTimeout) { clearTimeout(lobby.sabotageTimeout); lobby.sabotageTimeout = null; }
 
-      player.score += 20;
-      lobbyLog(lobby, `🔧 ${player.name} repaired sabotage at ${buildingName}! (+20 pts)`);
+      const isCrewmate = player.role === 'crewmate';
+      if (isCrewmate) {
+        player.score += 20;
+        lobbyLog(lobby, `🔧 Crewmate ${player.name} repaired sabotage at ${buildingName}! (+20 pts)`);
+        broadcastToLobby(lobby, { type: 'POINTS_UPDATE', playerId: player.id, points: player.score, reason: 'Repaired Sabotage' });
+        broadcastNotification(lobby, `🔧 Sabotage at ${buildingName} repaired by ${player.name}! (+20 pts)`, '#22c55e');
+      } else {
+        lobbyLog(lobby, `🔧 Impostor ${player.name} repaired sabotage at ${buildingName} (0 pts).`);
+        broadcastNotification(lobby, `🔧 Sabotage at ${buildingName} was repaired by ${player.name}.`, '#38bdf8');
+      }
 
       broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null, repairedBy: player.name });
-      broadcastToLobby(lobby, { type: 'POINTS_UPDATE', playerId: player.id, points: player.score, reason: 'Repaired Sabotage' });
-      broadcastNotification(lobby, `🔧 Sabotage at ${buildingName} repaired by ${player.name}! (+20 pts)`, '#22c55e');
       broadcastGameState(lobby);
       broadcastAllAdmins(lobby.code);
       return;
@@ -1285,7 +1419,23 @@ function handleMessage(ws, socketId, msg) {
         const name = lobby.activeSabotage.building;
         lobby.activeSabotage = null;
         lobby.sabotages = {};
-        lobbyLog(lobby, `Sabotage at ${name} auto-cleared after 60s.`);
+        lobby.sabotageTimeout = null;
+
+        // Deduct 2 points from every crewmate because the sabotage was not fixed
+        Object.values(lobby.players).forEach(p => {
+          if (p.role === 'crewmate') {
+            p.score = Math.max(0, p.score - 2);
+            broadcastToLobby(lobby, {
+              type: 'POINTS_UPDATE',
+              playerId: p.id,
+              points: p.score,
+              reason: 'Unresolved Sabotage (-2 pts)'
+            });
+          }
+        });
+
+        lobbyLog(lobby, `⚠️ Sabotage at ${name} expired without being repaired! -2 pts deducted from each Crewmate.`);
+        broadcastNotification(lobby, `💥 Sabotage at ${name} was unresolved! -2 pts to all Crewmates!`, '#ef4444');
         broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null });
         broadcastGameState(lobby);
         broadcastAllAdmins(lobby.code);
@@ -1302,10 +1452,40 @@ function handleMessage(ws, socketId, msg) {
     if (player.role !== 'impostor' || player.isDead || player.isRespawning || player.killCooldownLeft > 0) return;
 
     const target = lobby.players[msg.targetId];
-    if (!target || target.isDead || target.isRespawning || target.role !== 'crewmate') return;
+    if (!target || target.isDead || target.isRespawning || target.role !== 'crewmate') {
+      if (player.socket && player.socket.readyState === WebSocket.OPEN) {
+        player.socket.send(JSON.stringify({ type: 'KILL_FAILED', reason: 'Invalid or already eliminated target' }));
+      }
+      return;
+    }
+
+    // Support smooth killing while moving:
+    // Update killer position from client's reported position if within plausible speed/desync buffer
+    if (typeof msg.killerX === 'number' && typeof msg.killerY === 'number') {
+      const moveDelta = Math.hypot(msg.killerX - player.x, msg.killerY - player.y);
+      if (moveDelta <= 200) {
+        player.x = Math.max(40, Math.min(2760, msg.killerX));
+        player.y = Math.max(40, Math.min(1640, msg.killerY));
+      }
+    }
 
     const dist = Math.hypot(player.x - target.x, player.y - target.y);
-    if (dist > 140) return;
+    const targetDist = (typeof msg.targetX === 'number' && typeof msg.targetY === 'number')
+      ? Math.hypot(player.x - msg.targetX, player.y - msg.targetY)
+      : dist;
+    const effectiveDist = Math.min(dist, targetDist);
+
+    // 180px threshold provides comfortable buffer for network tick latency while moving
+    if (effectiveDist > 180) {
+      if (player.socket && player.socket.readyState === WebSocket.OPEN) {
+        player.socket.send(JSON.stringify({ type: 'KILL_FAILED', reason: 'Target out of reach' }));
+      }
+      return;
+    }
+
+    // Teleport/lunge killer to victim's location like in real Among Us
+    player.x = target.x;
+    player.y = target.y;
 
     target.isDead = true;
     target.score = Math.max(0, target.score - 5);
@@ -1345,8 +1525,41 @@ function handleMessage(ws, socketId, msg) {
   }
 
   if (type === 'CALL_VOTE') {
-    if (lobby.phase !== 'PLAYING' || player.isDead || player.isRespawning) return;
-    startVoting(lobby, player.name, msg.reason || 'Emergency Meeting');
+    if (lobby.phase !== 'PLAYING' || player.isDead || player.isRespawning || player.inVent) return;
+
+    // Rule: Meeting can only be called if:
+    // 1) A dead body is reported, OR
+    // 2) Player walked into Cafeteria and is near the emergency table (x: 1540, y: 340)
+    const isBodyReport = Boolean(
+      msg.bodyId ||
+      (msg.reason && (msg.reason.toLowerCase().includes('body') || msg.reason.toLowerCase().includes('reported') || msg.reason.toLowerCase().includes('report')))
+    );
+
+    if (isBodyReport) {
+      if (lobby.deadBodies.length === 0) {
+        if (player.socket && player.socket.readyState === WebSocket.OPEN) {
+          player.socket.send(JSON.stringify({ type: 'NOTIFICATION', msg: 'No dead body to report!', color: '#ef4444' }));
+        }
+        return;
+      }
+      startVoting(lobby, player.name, msg.reason || 'Reported a Dead Body');
+      return;
+    }
+
+    // Emergency Meeting: Must be within proximity of the Cafeteria emergency table
+    const distToTable = Math.hypot(player.x - 1540, player.y - 340);
+    if (distToTable > 165) {
+      if (player.socket && player.socket.readyState === WebSocket.OPEN) {
+        player.socket.send(JSON.stringify({
+          type: 'NOTIFICATION',
+          msg: 'Emergency meetings can only be called at the Cafeteria table!',
+          color: '#ef4444'
+        }));
+      }
+      return;
+    }
+
+    startVoting(lobby, player.name, 'Emergency Meeting');
     return;
   }
 

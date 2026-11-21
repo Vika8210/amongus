@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getSabotageBug, highlightCCode } from '../../game/taskCatalog.js';
 
 const TASK_DURATION_SEC = 20;
@@ -11,6 +11,24 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
   const [timedOut, setTimedOut] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  const onTaskSolvedRef = useRef(onTaskSolved);
+  useEffect(() => {
+    onTaskSolvedRef.current = onTaskSolved;
+  });
+
+  const onSabotagePatchedRef = useRef(onSabotagePatched);
+  useEffect(() => {
+    onSabotagePatchedRef.current = onSabotagePatched;
+  });
+
+  const startTsRef = useRef(null);
+  const autoCloseTimerRef = useRef(null);
+
   // Reset state whenever a new station/mode opens
   useEffect(() => {
     setSelectedOption(null);
@@ -19,34 +37,63 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
     setLeftMs(TASK_DURATION_SEC * 1000);
     setTimedOut(false);
     setSubmitting(false);
+    startTsRef.current = performance.now();
+
+    if (autoCloseTimerRef.current) {
+      clearTimeout(autoCloseTimerRef.current);
+      autoCloseTimerRef.current = null;
+    }
   }, [station?.id, isSabotage]);
 
   // 20-second task timer for standard Crewmate C coding tasks
   useEffect(() => {
-    if (!station || isSabotage || submitting) return;
-    const startTs = performance.now();
+    if (!station || isSabotage) return;
+
+    if (!startTsRef.current) {
+      startTsRef.current = performance.now();
+    }
     const totalMs = TASK_DURATION_SEC * 1000;
 
     const interval = setInterval(() => {
-      const remaining = Math.max(0, totalMs - (performance.now() - startTs));
+      if (submitting || timedOut) return;
+
+      const elapsed = performance.now() - startTsRef.current;
+      const remaining = Math.max(0, totalMs - elapsed);
       setLeftMs(remaining);
+
       if (remaining <= 0) {
         clearInterval(interval);
         setTimedOut(true);
         setFeedback({ type: 'wrong', text: "⏰ TIME'S UP (20s)! Task failed — try again." });
-        setTimeout(() => onClose(), 1400);
+        autoCloseTimerRef.current = setTimeout(() => {
+          onCloseRef.current?.();
+        }, 1500);
       }
-    }, 100);
+    }, 50);
 
-    return () => clearInterval(interval);
-  }, [station?.id, isSabotage, submitting, onClose]);
+    return () => {
+      clearInterval(interval);
+      if (autoCloseTimerRef.current) {
+        clearTimeout(autoCloseTimerRef.current);
+      }
+    };
+  }, [station?.id, isSabotage, submitting, timedOut]);
 
   if (!station) return null;
 
   const bugData = isSabotage ? getSabotageBug(station.id) : null;
   const leftSec = Math.ceil(leftMs / 1000);
-  const pct = (leftMs / (TASK_DURATION_SEC * 1000)) * 100;
+  const pct = Math.max(0, Math.min(100, (leftMs / (TASK_DURATION_SEC * 1000)) * 100));
   const timerState = leftSec <= 5 ? 'danger' : leftSec <= 10 ? 'warn' : '';
+
+  const qObj = station.activeQuestion || station;
+  const taskTitle = qObj.title || station.taskTitle || 'C Coding Task';
+  const taskQuestion = qObj.question || station.taskQuestion || 'What will be the output?';
+  const taskCode = qObj.code || station.code || '';
+  const taskOptions = qObj.options || station.options || [];
+  const correctAnswer = qObj.correctAnswer ?? station.correctAnswer ?? 0;
+  const taskExplanation = qObj.explanation || station.explanation || '';
+  const taskPoints = qObj.points || station.points || 10;
 
   const handleSubmit = () => {
     if (timedOut || submitting) return;
@@ -58,8 +105,8 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
           type: 'correct',
           text: `✅ SABOTAGE PATCHED! (+20 pts) — ${bugData.explanation}`
         });
-        onSabotagePatched(station, selectedBugLine);
-        setTimeout(() => onClose(), 1100);
+        onSabotagePatchedRef.current?.(station, selectedBugLine);
+        autoCloseTimerRef.current = setTimeout(() => onCloseRef.current?.(), 1100);
       } else {
         setFeedback({
           type: 'wrong',
@@ -69,15 +116,14 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
       return;
     }
 
-    if (selectedOption === station.correctAnswer) {
+    if (selectedOption === correctAnswer) {
       setSubmitting(true);
-      const pts = station.points || 10;
       setFeedback({
         type: 'correct',
-        text: `✅ CORRECT! (+${pts} pts) — ${station.explanation}`
+        text: `✅ CORRECT! (+${taskPoints} pts) — ${taskExplanation}`
       });
-      onTaskSolved(station, station.options[selectedOption], pts);
-      setTimeout(() => onClose(), 1100);
+      onTaskSolvedRef.current?.(station, qObj, taskOptions[selectedOption], taskPoints);
+      autoCloseTimerRef.current = setTimeout(() => onCloseRef.current?.(), 1100);
     } else {
       setFeedback({
         type: 'wrong',
@@ -102,7 +148,7 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
             >
               {isSabotage
                 ? 'CRITICAL SABOTAGE — TAP THE BUGGY LINE BELOW'
-                : station.taskTitle}
+                : taskTitle}
             </div>
           </div>
           <button className="btn-close-modal" onClick={onClose}>
@@ -126,7 +172,7 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
         )}
 
         <div className="task-question-text">
-          {isSabotage ? bugData.question : station.taskQuestion}
+          {isSabotage ? bugData.question : taskQuestion}
         </div>
 
         <div className="code-block">
@@ -147,18 +193,19 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
           ) : (
             <pre
               style={{ margin: 0 }}
-              dangerouslySetInnerHTML={{ __html: highlightCCode(station.code) }}
+              dangerouslySetInnerHTML={{ __html: highlightCCode(taskCode) }}
             />
           )}
         </div>
 
         {!isSabotage && (
           <div className="options-grid">
-            {station.options.map((opt, idx) => (
+            {taskOptions.map((opt, idx) => (
               <button
                 key={idx}
                 className={`btn-option ${selectedOption === idx ? 'selected' : ''}`}
-                onClick={() => !timedOut && setSelectedOption(idx)}
+                disabled={timedOut || submitting}
+                onClick={() => !timedOut && !submitting && setSelectedOption(idx)}
               >
                 {String.fromCharCode(65 + idx)}. {opt}
               </button>

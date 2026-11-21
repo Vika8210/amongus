@@ -8,7 +8,9 @@ function fmtMinSec(val) {
 
 export default function SettingsPanel({ settings, onChangeSetting }) {
   const impCount = settings.impostorsCount ?? settings.maxImpostors ?? 1;
-  const tasksPer = settings.tasksPerPlayer ?? 3;
+  const questionSection = settings.questionSection ?? 1;
+  const gameDuration = settings.gameDuration ?? 900;
+  const tasksPer = settings.tasksPerPlayer ?? 25;
   const killCd = settings.killCooldown ?? 30;
   const respawn = settings.respawnTime ?? 45;
   const roleRot = settings.roleRotation ?? settings.roleRotationInterval ?? 180;
@@ -29,6 +31,49 @@ export default function SettingsPanel({ settings, onChangeSetting }) {
       </div>
 
       <div className="settings-grid">
+        {/* Question Section Allocation */}
+        <div className="setting-item" style={{ gridColumn: 'span 2', background: 'rgba(56, 189, 248, 0.08)', borderColor: 'rgba(56, 189, 248, 0.4)' }}>
+          <div className="setting-header">
+            <span className="setting-label" style={{ color: '#38bdf8', fontWeight: 800 }}>
+              📚 Question Section Allotment (25 MCQs / 15 Min)
+            </span>
+            <span className="setting-val-badge" style={{ background: '#0284c7', color: '#fff' }}>
+              Section {questionSection}
+            </span>
+          </div>
+          <select
+            className="setting-select"
+            value={questionSection}
+            onChange={(e) => onChangeSetting('questionSection', parseInt(e.target.value, 10))}
+            style={{ fontWeight: 700 }}
+          >
+            <option value={1}>Section 1: Questions 1 to 25 (Loops, Conditions, Break/Continue)</option>
+            <option value={2}>Section 2: Questions 26 to 50 (Loop Control, Calculations & Logic)</option>
+            <option value={3}>Section 3: Questions 51 to 75 (Nested Loops, Calculations & Patterns)</option>
+          </select>
+          <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
+            Allocates 25 non-repeating C MCQs to this lobby. Each crewmate solves all 25 questions in 15 minutes without any duplicates.
+          </div>
+        </div>
+
+        {/* Lobby Game Duration (15 Minutes) */}
+        <div className="setting-item">
+          <div className="setting-header">
+            <span className="setting-label">⏱️ Lobby Game Duration</span>
+            <span className="setting-val-badge">{Math.round(gameDuration / 60)} min</span>
+          </div>
+          <select
+            className="setting-select"
+            value={gameDuration}
+            onChange={(e) => onChangeSetting('gameDuration', parseInt(e.target.value, 10))}
+          >
+            <option value={600}>10 Minutes (600s)</option>
+            <option value={900}>15 Minutes (900s) — Standard</option>
+            <option value={1200}>20 Minutes (1200s)</option>
+            <option value={1800}>30 Minutes (1800s)</option>
+          </select>
+        </div>
+
         <div className="setting-item">
           <div className="setting-header">
             <span className="setting-label">🔪 Impostors Count</span>

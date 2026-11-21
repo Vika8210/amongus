@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import '../styles/player.css';
 import { CONFIG } from '../game/config.js';
-import { SKELD_STATIONS } from '../game/taskCatalog.js';
+import { SKELD_STATIONS, getNextQuestionForStation, getRemainingStationsForPlayer } from '../game/taskCatalog.js';
 import { getWsUrl } from '../game/wsUrl.js';
 import { isStationSabotaged } from '../game/skeldRenderer.js';
 
@@ -53,7 +53,9 @@ export default function PlayerApp() {
     killCooldown: 0,
     killCooldownMax: 15,
     taskRefreshTimeLeft: 120,
-    settings: { crewVision: 150, impostorVision: 250, moveSpeed: 3, tasksPerPlayer: 3 },
+    gameTimeLeft: 900,
+    gameDuration: 900,
+    settings: { crewVision: 150, impostorVision: 250, moveSpeed: 3, tasksPerPlayer: 25, questionSection: 1, gameDuration: 900 },
     resetInput: null
   });
 
@@ -75,8 +77,11 @@ export default function PlayerApp() {
     nearSabotage: false,
     nearVent: null,
     nearBody: null,
+    nearEmergencyTable: false,
+    canKillTarget: false,
     killCooldown: 0,
-    waveTimeLeft: 120
+    waveTimeLeft: 120,
+    gameTimeLeft: 900
   });
 
   // Modals
@@ -316,8 +321,12 @@ export default function PlayerApp() {
               if (typeof st.settings.crewVision === 'number') e.settings.crewVision = st.settings.crewVision;
               if (typeof st.settings.impostorVision === 'number') e.settings.impostorVision = st.settings.impostorVision;
               if (typeof st.settings.moveSpeed === 'number') e.settings.moveSpeed = st.settings.moveSpeed;
+              if (typeof st.settings.playerSpeed === 'number') e.settings.playerSpeed = st.settings.playerSpeed;
               if (typeof st.settings.tasksPerPlayer === 'number') e.settings.tasksPerPlayer = st.settings.tasksPerPlayer;
+              if (st.settings.questionSection) e.settings.questionSection = st.settings.questionSection;
+              if (st.settings.gameDuration) e.settings.gameDuration = st.settings.gameDuration;
             }
+            if (typeof st.gameTimeLeft === 'number') e.gameTimeLeft = st.gameTimeLeft;
             if (typeof st.taskRefreshTimeLeft === 'number') e.taskRefreshTimeLeft = st.taskRefreshTimeLeft;
             if (Array.isArray(st.deadBodies)) e.deadBodies = [...st.deadBodies];
             syncPlayersMap(st.players);
@@ -346,9 +355,14 @@ export default function PlayerApp() {
             if (typeof msg.taskRefreshTimeLeft === 'number') {
               e.taskRefreshTimeLeft = msg.taskRefreshTimeLeft;
             }
+            if (typeof msg.gameTimeLeft === 'number') {
+              e.gameTimeLeft = msg.gameTimeLeft;
+            }
             break;
 
           case 'ROLE_ASSIGN':
+            if (msg.section) e.settings.questionSection = msg.section;
+            if (typeof msg.gameTimeLeft === 'number') e.gameTimeLeft = msg.gameTimeLeft;
             showRoleReveal(msg.role, msg.tasks);
             break;
 
@@ -364,17 +378,23 @@ export default function PlayerApp() {
             const isImp = String(e.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
             if (isImp) {
               e.assignedTasks = [];
-              e.myPlayer.completedTasks = [];
               break;
             }
             if (Array.isArray(msg.tasks)) {
               e.assignedTasks = msg.tasks.map((t) => (typeof t === 'string' ? t : t.room || t.id));
-              e.myPlayer.completedTasks = [];
-              e.taskRefreshTimeLeft = 120;
+              // Cumulative completedTasks preserved: solved questions NEVER repeat!
+              e.taskRefreshTimeLeft = typeof msg.waveTimeLeft === 'number' ? msg.waveTimeLeft : 120;
               setTaskModalState(null);
-              showToast('📋 New Task Wave! 3 fresh Skeld tasks assigned!', 'info');
+              showToast('🌊 New task wave arrived! 3 fresh Skeld tasks assigned!', 'info');
               syncUiSnapshot();
             }
+            break;
+          }
+
+          case 'KILL_FAILED': {
+            e.killCooldown = 0;
+            showToast(msg.reason || 'Could not reach target!', 'warning');
+            syncUiSnapshot();
             break;
           }
 
@@ -387,6 +407,10 @@ export default function PlayerApp() {
               const victim = e.players.get(vid);
               if (victim) victim.isDead = true;
               showToast(`💀 ${msg.victimName || victim?.name || 'A crewmate'} was eliminated!`, 'danger');
+            }
+            if (msg.killerId === e.myId && typeof msg.x === 'number' && typeof msg.y === 'number') {
+              e.myPlayer.x = msg.x;
+              e.myPlayer.y = msg.y;
             }
             if (typeof msg.x === 'number' && typeof msg.y === 'number') {
               e.deadBodies.push({
@@ -534,17 +558,6 @@ export default function PlayerApp() {
     syncUiSnapshot();
   }, [exitVentIfNeeded, sendWs, showToast, syncUiSnapshot]);
 
-  useEffect(() => {
-    const onKeyDown = (ev) => {
-      if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-      if (engineRef.current.screen === 'PLAYING' && ev.key.toLowerCase() === 'v') {
-        handleToggleVent();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleToggleVent]);
-
   // Actions wired to child components
   const handleJoin = useCallback(
     ({ lobbyCode: code, name, usn, color }) => {
@@ -584,9 +597,29 @@ export default function PlayerApp() {
           showToast(`🏃 Walk to ${station.name} and tap the sabotage console to fix it!`, 'warning');
           return;
         }
+        e.resetInput?.();
+        setTaskModalState({ station, isSabotage: true });
+        return;
+      }
+
+      // Crewmate standard MCQ task
+      const isImp = String(e.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
+      if (isImp) return;
+
+      const isAssigned = (e.assignedTasks || []).includes(station.id);
+      if (!isAssigned) {
+        showToast(`📍 No active task at ${station.name} in this wave! Check your map.`, 'info');
+        return;
+      }
+
+      const sec = e.settings.questionSection || 1;
+      const nextQ = getNextQuestionForStation(station.id, sec, e.myPlayer.completedTasks);
+      if (!nextQ) {
+        showToast(`✅ All tasks at ${station.name} are completed! Check map for other rooms.`, 'info');
+        return;
       }
       e.resetInput?.();
-      setTaskModalState({ station, isSabotage: !!isSab });
+      setTaskModalState({ station: { ...station, activeQuestion: nextQ }, isSabotage: false });
     },
     [showToast]
   );
@@ -613,6 +646,49 @@ export default function PlayerApp() {
     [sendWs, showToast]
   );
 
+  const handleCallEmergency = useCallback(() => {
+    const e = engineRef.current;
+    if (e.myPlayer.isDead) {
+      showToast('Ghosts cannot call emergency meetings!', 'danger');
+      return;
+    }
+    if (e.myPlayer.inVent) {
+      showToast('Cannot call emergency meeting while hidden in a vent!', 'warning');
+      return;
+    }
+    const distToTable = Math.hypot(e.myPlayer.x - CONFIG.EMERGENCY_TABLE_POS.x, e.myPlayer.y - CONFIG.EMERGENCY_TABLE_POS.y);
+    if (distToTable > CONFIG.EMERGENCY_TABLE_RADIUS) {
+      showToast('🏃 Walk into the Cafeteria and stand near the emergency table to call a meeting!', 'warning');
+      return;
+    }
+    exitVentIfNeeded();
+    sendWs({
+      type: 'CALL_VOTE',
+      reason: 'Emergency Meeting',
+      callerName: e.myPlayer.name
+    });
+  }, [exitVentIfNeeded, sendWs, showToast]);
+
+  const handleReportBody = useCallback(() => {
+    const e = engineRef.current;
+    if (e.myPlayer.isDead) {
+      showToast('Ghosts cannot report bodies!', 'danger');
+      return;
+    }
+    const body = e.deadBodyNear;
+    if (!body) {
+      showToast('Walk closer to a dead body to report it!', 'info');
+      return;
+    }
+    exitVentIfNeeded();
+    sendWs({
+      type: 'CALL_VOTE',
+      reason: `Reported Body of ${body.victimName}`,
+      bodyId: body.id,
+      callerName: e.myPlayer.name
+    });
+  }, [exitVentIfNeeded, sendWs, showToast]);
+
   const handleKill = useCallback(() => {
     const e = engineRef.current;
     const isImp = String(e.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
@@ -632,14 +708,87 @@ export default function PlayerApp() {
 
     if (nearest) {
       e.killCooldown = e.killCooldownMax || 15;
-      sendWs({ type: 'KILL', killerId: e.myId, targetId: nearest.id, x: nearest.x, y: nearest.y });
+      sendWs({
+        type: 'KILL',
+        killerId: e.myId,
+        targetId: nearest.id,
+        killerX: Math.round(e.myPlayer.x),
+        killerY: Math.round(e.myPlayer.y),
+        targetX: Math.round(nearest.x),
+        targetY: Math.round(nearest.y)
+      });
+      // Snap killer to target (smooth kill lunge animation like Among Us)
+      e.myPlayer.x = nearest.x;
+      e.myPlayer.y = nearest.y;
       showToast(`🔪 Eliminated ${nearest.name}!`, 'danger');
+      syncUiSnapshot();
     } else {
-      showToast('Walk closer to a crewmate to kill!', 'info');
+      showToast('Walk closer to a crewmate to kill! (Hotkeys: Q to kill, WASD to move)', 'info');
     }
-  }, [sendWs, showToast]);
+  }, [sendWs, showToast, syncUiSnapshot]);
+
+  // Global game keyboard shortcuts (Q: Kill, R: Report, E/Space: Use/Task/Meeting/Vent, V: Vent)
+  useEffect(() => {
+    const onKeyDown = (ev) => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+      if (engineRef.current.screen !== 'PLAYING') return;
+
+      const key = ev.key.toLowerCase();
+      if (key === 'v') {
+        handleToggleVent();
+      } else if (key === 'q') {
+        handleKill();
+      } else if (key === 'r') {
+        handleReportBody();
+      } else if (key === 'e' || ev.code === 'Space') {
+        const e = engineRef.current;
+        if (e.nearEmergencyTable && !e.myPlayer.isDead && !e.myPlayer.inVent) {
+          handleCallEmergency();
+        } else if (e.currentStationNear) {
+          handleOpenStation(e.currentStationNear, hudProx.nearSabotage);
+        } else if (e.currentVentNear) {
+          handleToggleVent();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleToggleVent, handleKill, handleReportBody, handleCallEmergency, handleOpenStation, hudProx.nearSabotage]);
 
   const handleSendMove = useCallback((coords) => sendWs({ type: 'MOVE', ...coords }), [sendWs]);
+
+  const handleCloseTaskModal = useCallback(() => {
+    setTaskModalState(null);
+  }, []);
+
+  const handleTaskSolved = useCallback((station, qObj, answer, pts) => {
+    const e = engineRef.current;
+    const qKey = qObj?.id || station.activeQuestion?.id || station.id;
+    if (!e.myPlayer.completedTasks.includes(qKey)) {
+      e.myPlayer.completedTasks.push(qKey);
+      e.myPlayer.score += pts;
+      // Instantly clear completed station from current wave assignedTasks so yellow '!' vanishes!
+      e.assignedTasks = (e.assignedTasks || []).filter((id) => id !== station.id);
+      sendWs({ type: 'TASK_COMPLETE', taskId: station.id, questionId: qKey, answer, points: pts });
+      syncUiSnapshot();
+    }
+    const doneCount = e.myPlayer.completedTasks.length;
+    showToast(`✅ Question solved! (+${pts} pts) — Total Progress: ${doneCount}/25`, 'success');
+  }, [sendWs, showToast, syncUiSnapshot]);
+
+  const handleSabotagePatched = useCallback((station, line) => {
+    const e = engineRef.current;
+    const isImp = String(e.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
+    if (!isImp) {
+      e.myPlayer.score += 20;
+      showToast('🔧 Sabotage successfully patched! (+20 pts)', 'success');
+    } else {
+      showToast('🔧 Sabotage patched (Impostors do not receive points for repairs).', 'info');
+    }
+    e.activeSabotage = null;
+    sendWs({ type: 'SABOTAGE', action: 'fix', buildingId: station.id, line, success: true });
+    syncUiSnapshot();
+  }, [sendWs, showToast, syncUiSnapshot]);
 
   return (
     <>
@@ -672,6 +821,7 @@ export default function PlayerApp() {
             onSendMove={handleSendMove}
             onProximitySync={setHudProx}
             onTapStation={handleOpenStation}
+            onCallEmergency={handleCallEmergency}
             onShowToast={showToast}
           />
 
@@ -679,8 +829,9 @@ export default function PlayerApp() {
             score={mySnapshot.score}
             role={mySnapshot.role}
             completedCount={mySnapshot.completedTasks.length}
-            totalTasks={assignedTasks.length || 3}
-            waveTimeLeft={hudProx.waveTimeLeft}
+            totalTasks={25}
+            matchTimeLeft={hudProx.gameTimeLeft ?? engineRef.current.gameTimeLeft}
+            waveTimeLeft={hudProx.waveTimeLeft ?? engineRef.current.taskRefreshTimeLeft}
             viewMode={viewMode}
             activeSabotage={activeSabotage}
             isNearSabotage={hudProx.nearSabotage}
@@ -698,30 +849,11 @@ export default function PlayerApp() {
             nearStation={hudProx.nearStation}
             nearSabotage={hudProx.nearSabotage}
             nearBody={hudProx.nearBody}
+            nearEmergencyTable={hudProx.nearEmergencyTable}
+            canKillTarget={hudProx.canKillTarget}
             killCooldown={hudProx.killCooldown}
-            onVote={() => {
-              if (engineRef.current.myPlayer.isDead) {
-                showToast('Ghosts cannot call emergency meetings!', 'danger');
-                return;
-              }
-              exitVentIfNeeded();
-              sendWs({
-                type: 'CALL_VOTE',
-                reason: 'Emergency Meeting',
-                callerName: engineRef.current.myPlayer.name
-              });
-            }}
-            onReport={() => {
-              const body = engineRef.current.deadBodyNear;
-              if (!body) return;
-              exitVentIfNeeded();
-              sendWs({
-                type: 'CALL_VOTE',
-                reason: `Reported Body of ${body.victimName}`,
-                bodyId: body.id,
-                callerName: engineRef.current.myPlayer.name
-              });
-            }}
+            onVote={handleCallEmergency}
+            onReport={handleReportBody}
             onToggleVent={handleToggleVent}
             onTravelVent={handleTravelVent}
             onExitVent={exitVentIfNeeded}
@@ -739,25 +871,9 @@ export default function PlayerApp() {
       <TaskModal
         station={taskModalState?.station}
         isSabotage={!!taskModalState?.isSabotage}
-        onClose={() => setTaskModalState(null)}
-        onTaskSolved={(station, answer, pts) => {
-          const e = engineRef.current;
-          if (!e.myPlayer.completedTasks.includes(station.id)) {
-            e.myPlayer.completedTasks.push(station.id);
-            e.myPlayer.score += pts;
-            sendWs({ type: 'TASK_COMPLETE', taskId: station.id, answer, points: pts });
-            syncUiSnapshot();
-          }
-          showToast(`✅ Task completed at ${station.name}! (+${pts} pts)`, 'success');
-        }}
-        onSabotagePatched={(station, line) => {
-          const e = engineRef.current;
-          e.myPlayer.score += 20;
-          e.activeSabotage = null;
-          sendWs({ type: 'SABOTAGE', action: 'fix', buildingId: station.id, line, success: true });
-          syncUiSnapshot();
-          showToast('🔧 Sabotage successfully patched! (+20 pts)', 'success');
-        }}
+        onClose={handleCloseTaskModal}
+        onTaskSolved={handleTaskSolved}
+        onSabotagePatched={handleSabotagePatched}
       />
 
       <SabotageModal
