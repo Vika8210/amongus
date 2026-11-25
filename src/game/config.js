@@ -21,7 +21,7 @@ export const CONFIG = {
   MOVE_SPEED: 5.5,
   MOVE_SEND_INTERVAL_MS: 50,
   PING_INTERVAL_MS: 30000,
-  ADMIN_KEY: 'Vik@#123',
+  ADMIN_KEY: 'hal@#9483',
   SUIT_COLORS: [
     '#c51111', // Red
     '#132ed1', // Blue
