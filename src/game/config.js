@@ -25,13 +25,18 @@ export const CONFIG = {
   SUIT_COLORS: [
     '#c51111', // Red
     '#132ed1', // Blue
-    '#117f2d', // Dark Green
+    '#117f2d', // Green
     '#ed54ba', // Pink
     '#ef7d0d', // Orange
     '#f5f557', // Yellow
     '#3f474e', // Black
     '#d6e0f0', // White
     '#6b2fbb', // Purple
-    '#38fedc'  // Cyan
+    '#71491e', // Brown
+    '#38fedc', // Cyan
+    '#50ef39', // Lime
+    '#6b1928', // Maroon
+    '#ecc0d3', // Rose
+    '#fffebe'  // Banana
   ]
 };

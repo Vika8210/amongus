@@ -20,6 +20,8 @@ const DEFAULT_SETTINGS = {
   gameDuration: 900,
   tasksPerPlayer: 25,
   killCooldown: 30,
+  sabotageCooldown: 30,
+  emergencyCooldown: 30,
   respawnTime: 45,
   roleRotation: 180,
   votingTime: 60,
@@ -142,7 +144,13 @@ export default function AdminApp() {
           const nextPhase = String(gs.phase || 'LOBBY').toUpperCase();
           setPhase((prevPhase) => {
             if (nextPhase === 'ENDED' && prevPhase !== 'ENDED') {
-              setGameOverData({ winner: gs.winner || 'CREW', players: list });
+              setGameOverData({
+                winner: gs.winner || gs.topPlayerName || 'CREW',
+                topPlayerName: gs.topPlayerName,
+                topScore: gs.topScore,
+                reason: gs.reason,
+                players: list
+              });
             }
             return nextPhase;
           });

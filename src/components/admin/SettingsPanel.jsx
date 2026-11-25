@@ -12,6 +12,8 @@ export default function SettingsPanel({ settings, onChangeSetting }) {
   const gameDuration = settings.gameDuration ?? 900;
   const tasksPer = settings.tasksPerPlayer ?? 25;
   const killCd = settings.killCooldown ?? 30;
+  const sabCd = settings.sabotageCooldown ?? 30;
+  const emerCd = settings.emergencyCooldown ?? 30;
   const respawn = settings.respawnTime ?? 45;
   const roleRot = settings.roleRotation ?? settings.roleRotationInterval ?? 180;
   const voteTime = settings.votingTime ?? settings.votingDuration ?? 60;
@@ -129,6 +131,50 @@ export default function SettingsPanel({ settings, onChangeSetting }) {
           <div className="slider-range-labels">
             <span>10s</span>
             <span>120s</span>
+          </div>
+        </div>
+
+        <div className="setting-item">
+          <div className="setting-header">
+            <span className="setting-label">⚡ Sabotage Cooldown</span>
+            <span className="setting-val-badge">{sabCd}s</span>
+          </div>
+          <div className="slider-container">
+            <input
+              type="range"
+              className="setting-slider"
+              min={15}
+              max={120}
+              step={5}
+              value={sabCd}
+              onChange={(e) => onChangeSetting('sabotageCooldown', parseFloat(e.target.value))}
+            />
+          </div>
+          <div className="slider-range-labels">
+            <span>15s</span>
+            <span>120s (Default: 30s)</span>
+          </div>
+        </div>
+
+        <div className="setting-item">
+          <div className="setting-header">
+            <span className="setting-label">🚨 Emergency Meeting Cooldown</span>
+            <span className="setting-val-badge">{emerCd}s</span>
+          </div>
+          <div className="slider-container">
+            <input
+              type="range"
+              className="setting-slider"
+              min={15}
+              max={120}
+              step={5}
+              value={emerCd}
+              onChange={(e) => onChangeSetting('emergencyCooldown', parseFloat(e.target.value))}
+            />
+          </div>
+          <div className="slider-range-labels">
+            <span>15s</span>
+            <span>120s (Default: 30s)</span>
           </div>
         </div>
 

@@ -3,9 +3,17 @@ import { getSabotageBug, highlightCCode } from '../../game/taskCatalog.js';
 
 const TASK_DURATION_SEC = 20;
 
-export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, onSabotagePatched }) {
+export default function TaskModal({
+  station,
+  isSabotage,
+  onClose,
+  onTaskSolved,
+  onTaskWrong,
+  onSabotagePatched
+}) {
   const [selectedOption, setSelectedOption] = useState(null);
   const [selectedBugLine, setSelectedBugLine] = useState(null);
+  const [wrongOptions, setWrongOptions] = useState([]);
   const [feedback, setFeedback] = useState(null); // { type: 'correct'|'wrong', text: string }
   const [leftMs, setLeftMs] = useState(TASK_DURATION_SEC * 1000);
   const [timedOut, setTimedOut] = useState(false);
@@ -21,6 +29,11 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
     onTaskSolvedRef.current = onTaskSolved;
   });
 
+  const onTaskWrongRef = useRef(onTaskWrong);
+  useEffect(() => {
+    onTaskWrongRef.current = onTaskWrong;
+  });
+
   const onSabotagePatchedRef = useRef(onSabotagePatched);
   useEffect(() => {
     onSabotagePatchedRef.current = onSabotagePatched;
@@ -33,6 +46,7 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
   useEffect(() => {
     setSelectedOption(null);
     setSelectedBugLine(null);
+    setWrongOptions([]);
     setFeedback(null);
     setLeftMs(TASK_DURATION_SEC * 1000);
     setTimedOut(false);
@@ -103,7 +117,7 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
         setSubmitting(true);
         setFeedback({
           type: 'correct',
-          text: `✅ SABOTAGE PATCHED! (+20 pts) — ${bugData.explanation}`
+          text: `✅ SABOTAGE PATCHED! (+10 pts) — ${bugData.explanation}`
         });
         onSabotagePatchedRef.current?.(station, selectedBugLine);
         autoCloseTimerRef.current = setTimeout(() => onCloseRef.current?.(), 1100);
@@ -125,14 +139,21 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
       onTaskSolvedRef.current?.(station, qObj, taskOptions[selectedOption], taskPoints);
       autoCloseTimerRef.current = setTimeout(() => onCloseRef.current?.(), 1100);
     } else {
+      const wrongIdx = selectedOption;
+      setWrongOptions((prev) => (prev.includes(wrongIdx) ? prev : [...prev, wrongIdx]));
+      setSelectedOption(null);
       setFeedback({
         type: 'wrong',
-        text: '❌ Incorrect output! Trace the C code quickly before time runs out!'
+        text: '❌ WRONG ANSWER! (-2 pts) Incorrect output. Trace the C code and try another option before time runs out!'
       });
+      onTaskWrongRef.current?.(station, qObj, taskOptions[wrongIdx], 2);
     }
   };
 
-  const canSubmit = !timedOut && !submitting && (isSabotage ? selectedBugLine !== null : selectedOption !== null);
+  const canSubmit =
+    !timedOut &&
+    !submitting &&
+    (isSabotage ? selectedBugLine !== null : selectedOption !== null && !wrongOptions.includes(selectedOption));
 
   return (
     <div className="modal-overlay open">
@@ -200,16 +221,19 @@ export default function TaskModal({ station, isSabotage, onClose, onTaskSolved, 
 
         {!isSabotage && (
           <div className="options-grid">
-            {taskOptions.map((opt, idx) => (
-              <button
-                key={idx}
-                className={`btn-option ${selectedOption === idx ? 'selected' : ''}`}
-                disabled={timedOut || submitting}
-                onClick={() => !timedOut && !submitting && setSelectedOption(idx)}
-              >
-                {String.fromCharCode(65 + idx)}. {opt}
-              </button>
-            ))}
+            {taskOptions.map((opt, idx) => {
+              const isWrong = wrongOptions.includes(idx);
+              return (
+                <button
+                  key={idx}
+                  className={`btn-option ${selectedOption === idx ? 'selected' : ''} ${isWrong ? 'wrong-option' : ''}`}
+                  disabled={timedOut || submitting || isWrong}
+                  onClick={() => !timedOut && !submitting && !isWrong && setSelectedOption(idx)}
+                >
+                  {String.fromCharCode(65 + idx)}. {opt} {isWrong ? '❌ (-2 pts)' : ''}
+                </button>
+              );
+            })}
           </div>
         )}
 

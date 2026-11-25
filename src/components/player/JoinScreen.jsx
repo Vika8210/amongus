@@ -6,6 +6,7 @@ export default function JoinScreen({ connStatus, joinError, onJoin }) {
   const [name, setName] = useState('');
   const [usn, setUsn] = useState('');
   const [color, setColor] = useState(CONFIG.SUIT_COLORS[0]);
+  const [takenColors, setTakenColors] = useState([]);
   const [localError, setLocalError] = useState('');
 
   // Auto-fill lobby code from QR URL (?code=XXXXXX)
@@ -13,6 +14,48 @@ export default function JoinScreen({ connStatus, joinError, onJoin }) {
     const codeParam = new URLSearchParams(window.location.search).get('code');
     if (codeParam) setLobbyCode(codeParam.trim().toUpperCase());
   }, []);
+
+  // Poll taken colors for the entered lobby code
+  useEffect(() => {
+    const cleanCode = lobbyCode.trim().toUpperCase();
+    if (cleanCode.length < 3) {
+      setTakenColors([]);
+      return;
+    }
+
+    let active = true;
+    const fetchTaken = async () => {
+      try {
+        const res = await fetch(`/api/lobby-colors?code=${cleanCode}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (active && data && Array.isArray(data.usedColors)) {
+          setTakenColors(data.usedColors.map((c) => (c || '').toLowerCase()));
+        }
+      } catch (err) {
+        // silent fail
+      }
+    };
+
+    fetchTaken();
+    const interval = setInterval(fetchTaken, 2000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [lobbyCode]);
+
+  // If currently selected color becomes taken, auto-switch to first available
+  useEffect(() => {
+    if (color && takenColors.includes(color.toLowerCase())) {
+      const firstAvailable = CONFIG.SUIT_COLORS.find(
+        (hex) => !takenColors.includes(hex.toLowerCase())
+      );
+      if (firstAvailable) {
+        setColor(firstAvailable);
+      }
+    }
+  }, [takenColors, color]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -28,12 +71,17 @@ export default function JoinScreen({ connStatus, joinError, onJoin }) {
       setLocalError('Please enter your Name to board The Skeld!');
       return;
     }
+    if (takenColors.includes(color.toLowerCase())) {
+      setLocalError('This spacesuit color is already taken by another player! Please choose an available color.');
+      return;
+    }
 
     setLocalError('');
     onJoin({ lobbyCode: cleanCode, name: cleanName, usn: cleanUsn, color });
   };
 
   const errorText = localError || joinError;
+  const availableCount = CONFIG.SUIT_COLORS.filter((h) => !takenColors.includes(h.toLowerCase())).length;
 
   return (
     <section id="joinScreen" className="screen space-bg active">
@@ -100,18 +148,33 @@ export default function JoinScreen({ connStatus, joinError, onJoin }) {
         </div>
 
         <div className="form-group">
-          <label className="form-label">Select Spacesuit Color</label>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+            <label className="form-label" style={{ marginBottom: 0 }}>
+              Select Spacesuit Color (15 Available)
+            </label>
+            {takenColors.length > 0 && (
+              <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600 }}>
+                {availableCount}/15 Available
+              </span>
+            )}
+          </div>
           <div className="color-picker-grid">
-            {CONFIG.SUIT_COLORS.map((hex) => (
-              <button
-                key={hex}
-                type="button"
-                className={`color-swatch ${color === hex ? 'selected' : ''}`}
-                style={{ background: hex }}
-                onClick={() => setColor(hex)}
-                aria-label={`Select color ${hex}`}
-              />
-            ))}
+            {CONFIG.SUIT_COLORS.map((hex) => {
+              const isTaken = takenColors.includes(hex.toLowerCase());
+              const isSelected = color.toLowerCase() === hex.toLowerCase();
+              return (
+                <button
+                  key={hex}
+                  type="button"
+                  className={`color-swatch ${isSelected ? 'selected' : ''} ${isTaken ? 'taken' : ''}`}
+                  style={{ background: hex }}
+                  disabled={isTaken}
+                  onClick={() => !isTaken && setColor(hex)}
+                  title={isTaken ? 'Color taken by another crewmate' : `Select color ${hex}`}
+                  aria-label={`Select color ${hex}`}
+                />
+              );
+            })}
           </div>
         </div>
 
@@ -133,8 +196,8 @@ export default function JoinScreen({ connStatus, joinError, onJoin }) {
           </div>
         )}
 
-        <button type="submit" className="btn-primary">
-          🚀 JOIN LOBBY
+        <button type="submit" className="btn-primary" disabled={availableCount === 0 && takenColors.length > 0}>
+          {availableCount === 0 && takenColors.length > 0 ? 'LOBBY FULL (15/15 COLORS TAKEN)' : '🚀 JOIN LOBBY'}
         </button>
 
         <div className="conn-status">{connStatus}</div>

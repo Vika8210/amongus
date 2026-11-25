@@ -376,17 +376,44 @@ export function renderSkeldFrame(ctx, canvas, state) {
   // Live Emergency Table indicator when nearby
   if (state.nearEmergencyTable && !state.myPlayer.isDead && !state.myPlayer.inVent) {
     const pulseTable = 0.5 + 0.5 * Math.sin(now * 0.006);
+    const isLocked = Boolean(state.activeSabotage);
+    const onCd = (state.emergencyCooldown || 0) > 0;
     ctx.save();
-    ctx.strokeStyle = `rgba(239, 68, 68, ${0.45 + pulseTable * 0.45})`;
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(1540, 340, 76 + pulseTable * 8, 0, Math.PI * 2);
-    ctx.stroke();
 
-    ctx.fillStyle = '#ef4444';
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('🚨 EMERGENCY TABLE [E]', 1540, 340 - 80);
+    if (isLocked) {
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.75)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(1540, 340, 76, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = '#ef4444';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('🔒 EMERGENCY LOCKED (SABOTAGE ACTIVE)', 1540, 340 - 80);
+    } else if (onCd) {
+      ctx.strokeStyle = 'rgba(250, 204, 21, 0.75)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(1540, 340, 76, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = '#facc15';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`⏳ EMERGENCY COOLDOWN (${Math.ceil(state.emergencyCooldown)}s)`, 1540, 340 - 80);
+    } else {
+      ctx.strokeStyle = `rgba(239, 68, 68, ${0.45 + pulseTable * 0.45})`;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(1540, 340, 76 + pulseTable * 8, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = '#ef4444';
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('🚨 EMERGENCY TABLE [E]', 1540, 340 - 80);
+    }
     ctx.restore();
   }
 
@@ -410,9 +437,10 @@ export function renderSkeldFrame(ctx, canvas, state) {
         drawRoundRect(ctx, vent.x - 25, vent.y - 19, 50, 38, 7);
         ctx.stroke();
         ctx.font = 'bold 11px "Segoe UI", sans-serif';
-        ctx.fillStyle = state.myPlayer.inVent ? '#fef08a' : '#67e8f9';
+        const ventSec = Math.max(0, Math.ceil(state.ventTimeLeft ?? 15));
+        ctx.fillStyle = state.myPlayer.inVent ? (ventSec <= 5 ? '#f87171' : '#fef08a') : '#67e8f9';
         ctx.textAlign = 'center';
-        ctx.fillText(state.myPlayer.inVent ? '🕳️ HIDDEN IN VENT' : '🕳️ VENT [V]', vent.x, vent.y - 26 + Math.sin(time * 5) * 2);
+        ctx.fillText(state.myPlayer.inVent ? `🕳️ IN VENT (${ventSec}s)` : '🕳️ VENT [V]', vent.x, vent.y - 26 + Math.sin(time * 5) * 2);
         ctx.restore();
       }
     }

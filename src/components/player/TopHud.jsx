@@ -32,7 +32,7 @@ export default function TopHud({
       <div className="hud-group">
         <div className="hud-pill">
           <span>🏆</span>
-          <span>Score: {score || 0}pts</span>
+          <span>Score: {typeof score === 'number' ? score : (score || 0)}pts</span>
         </div>
 
         <div className={`role-badge ${isImp ? 'impostor' : 'crewmate'}`}>

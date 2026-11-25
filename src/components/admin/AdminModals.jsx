@@ -48,19 +48,23 @@ export function QrModal({ open, lobbyCode, qrVersion, onClose }) {
 export function GameOverModal({ data, onStartNew, onExportCsv, onClose }) {
   if (!data) return null;
 
-  const isCrewWin = String(data.winner || 'CREW').toUpperCase().includes('CREW');
   const sorted = [...(data.players || [])].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const topPlayer = sorted[0];
+  const topName = data.topPlayerName || (topPlayer ? topPlayer.name : data.winner) || 'No One';
+  const topScore = data.topScore ?? (topPlayer ? topPlayer.score : 0);
+  const topRole = topPlayer?.role ? ` (${String(topPlayer.role).toUpperCase()})` : '';
 
   return (
     <div className="modal-overlay" style={{ display: 'flex' }}>
       <div className="modal-card" style={{ maxWidth: '600px' }}>
-        <h2 style={{ color: isCrewWin ? '#38bdf8' : '#ef4444' }}>
-          {isCrewWin ? '🏆 GAME OVER — CREW WINS!' : '🔪 GAME OVER — IMPOSTORS WIN!'}
+        <div style={{ fontSize: '13px', fontWeight: 800, color: '#facc15', letterSpacing: '2px', textTransform: 'uppercase', marginBottom: '4px' }}>
+          🏆 MATCH OVER — HIGHEST POINTS WINNER
+        </div>
+        <h2 style={{ color: '#facc15', margin: '4px 0 8px 0', fontSize: '24px' }}>
+          {`👑 WINNER: ${topName.toUpperCase()} ${topRole} (${topScore} PTS)`}
         </h2>
-        <p>
-          {isCrewWin
-            ? 'All tasks completed or impostors successfully ejected.'
-            : 'The Impostors infiltrated The Skeld and eliminated the crew!'}
+        <p style={{ color: '#94a3b8', margin: '0 0 16px 0', fontSize: '13px' }}>
+          {data.reason || 'Round finished. Player with the highest points won the match!'}
         </p>
 
         <div

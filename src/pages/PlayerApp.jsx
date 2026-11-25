@@ -52,10 +52,13 @@ export default function PlayerApp() {
     deadBodyNear: null,
     killCooldown: 0,
     killCooldownMax: 15,
+    sabotageCooldown: 30,
+    emergencyCooldown: 30,
+    ventTimeLeft: 15,
     taskRefreshTimeLeft: 120,
     gameTimeLeft: 900,
     gameDuration: 900,
-    settings: { crewVision: 150, impostorVision: 250, moveSpeed: 3, tasksPerPlayer: 25, questionSection: 1, gameDuration: 900 },
+    settings: { crewVision: 150, impostorVision: 250, moveSpeed: 3, tasksPerPlayer: 25, questionSection: 1, gameDuration: 900, sabotageCooldown: 30, emergencyCooldown: 30 },
     resetInput: null
   });
 
@@ -80,6 +83,9 @@ export default function PlayerApp() {
     nearEmergencyTable: false,
     canKillTarget: false,
     killCooldown: 0,
+    sabotageCooldown: 30,
+    emergencyCooldown: 30,
+    ventTimeLeft: 15,
     waveTimeLeft: 120,
     gameTimeLeft: 900
   });
@@ -138,6 +144,7 @@ export default function PlayerApp() {
         e.assignedTasks = [];
         e.myPlayer.completedTasks = [];
         e.killCooldown = e.killCooldownMax || 15;
+        e.sabotageCooldown = e.settings.sabotageCooldown || 30;
       } else if (Array.isArray(tasks) && tasks.length > 0) {
         e.assignedTasks = tasks.map((t) => (typeof t === 'string' ? t : t.room || t.id));
         e.myPlayer.completedTasks = [];
@@ -145,6 +152,7 @@ export default function PlayerApp() {
         const shuffled = [...SKELD_STATIONS].sort(() => 0.5 - Math.random());
         e.assignedTasks = shuffled.slice(0, 3).map((s) => s.id);
       }
+      e.emergencyCooldown = e.settings.emergencyCooldown || 30;
 
       syncUiSnapshot();
       switchScreen('REVEAL');
@@ -160,12 +168,13 @@ export default function PlayerApp() {
     [switchScreen, syncUiSnapshot]
   );
 
-  const exitVentIfNeeded = useCallback(() => {
+  const exitVentIfNeeded = useCallback((isTimeout = false) => {
     const e = engineRef.current;
     if (!e.myPlayer.inVent) return;
     const prevVent = e.activeVent;
     e.myPlayer.inVent = false;
     e.activeVent = null;
+    e.ventTimeLeft = 15;
     setActiveVent(null);
     sendWs({
       type: 'VENT',
@@ -173,9 +182,17 @@ export default function PlayerApp() {
       x: Math.round(e.myPlayer.x),
       y: Math.round(e.myPlayer.y)
     });
-    if (prevVent) showToast(`🚪 Exited ${prevVent.room} Vent`, 'info');
+    if (isTimeout) {
+      showToast(`⏱️ Vent limit expired (15s)! Automatically exited ${prevVent ? prevVent.room : ''} vent.`, 'warning');
+    } else if (prevVent) {
+      showToast(`🚪 Exited ${prevVent.room} Vent`, 'info');
+    }
     syncUiSnapshot();
   }, [sendWs, showToast, syncUiSnapshot]);
+
+  const handleAutoExitVent = useCallback(() => {
+    exitVentIfNeeded(true);
+  }, [exitVentIfNeeded]);
 
   // WebSocket Connection & Message Router
   useEffect(() => {
@@ -328,6 +345,8 @@ export default function PlayerApp() {
             }
             if (typeof st.gameTimeLeft === 'number') e.gameTimeLeft = st.gameTimeLeft;
             if (typeof st.taskRefreshTimeLeft === 'number') e.taskRefreshTimeLeft = st.taskRefreshTimeLeft;
+            if (typeof st.emergencyCooldownLeft === 'number') e.emergencyCooldown = st.emergencyCooldownLeft;
+            if (typeof st.sabotageCooldownLeft === 'number') e.sabotageCooldown = st.sabotageCooldownLeft;
             if (Array.isArray(st.deadBodies)) e.deadBodies = [...st.deadBodies];
             syncPlayersMap(st.players);
             if (st.activeSabotage !== undefined) e.activeSabotage = st.activeSabotage;
@@ -452,9 +471,11 @@ export default function PlayerApp() {
                 buildingId: msg.buildingId || 'reactor',
                 building: msg.building || msg.roomName || 'Reactor'
               };
+              e.sabotageCooldown = typeof msg.sabotageCooldownLeft === 'number' ? msg.sabotageCooldownLeft : 30;
               showToast(`🚨 SABOTAGE AT ${e.activeSabotage.building.toUpperCase()}!`, 'danger');
             } else {
               e.activeSabotage = null;
+              e.sabotageCooldown = typeof msg.sabotageCooldownLeft === 'number' ? msg.sabotageCooldownLeft : 30;
               showToast(`🔧 Sabotage repaired${msg.repairedBy ? ` by ${msg.repairedBy}` : ''}!`, 'success');
             }
             syncUiSnapshot();
@@ -475,6 +496,8 @@ export default function PlayerApp() {
 
           case 'VOTE_RESULT': {
             e.phase = 'PLAYING';
+            e.emergencyCooldown = 30;
+            e.sabotageCooldown = 30;
             const summary = msg.ejectedName
               ? `🚀 ${msg.ejectedName} was ejected!`
               : 'No one was ejected (Tie / Skipped).';
@@ -550,11 +573,12 @@ export default function PlayerApp() {
     const vent = e.currentVentNear;
     e.myPlayer.inVent = true;
     e.activeVent = vent;
+    e.ventTimeLeft = 15;
     e.myPlayer.x = vent.x;
     e.myPlayer.y = vent.y;
     setActiveVent(vent);
     sendWs({ type: 'VENT', inVent: true, x: vent.x, y: vent.y });
-    showToast(`🕳️ Hidden inside ${vent.room} Vent`, 'info');
+    showToast(`🕳️ Hidden inside ${vent.room} Vent (15s max)`, 'info');
     syncUiSnapshot();
   }, [exitVentIfNeeded, sendWs, showToast, syncUiSnapshot]);
 
@@ -656,6 +680,14 @@ export default function PlayerApp() {
       showToast('Cannot call emergency meeting while hidden in a vent!', 'warning');
       return;
     }
+    if (e.activeSabotage) {
+      showToast(`🚨 Cannot call emergency meeting during active sabotage! Fix ${e.activeSabotage.building || 'the sabotage'} first!`, 'danger');
+      return;
+    }
+    if ((e.emergencyCooldown || 0) > 0) {
+      showToast(`⏳ Emergency meeting on cooldown (${Math.ceil(e.emergencyCooldown)}s remaining)!`, 'warning');
+      return;
+    }
     const distToTable = Math.hypot(e.myPlayer.x - CONFIG.EMERGENCY_TABLE_POS.x, e.myPlayer.y - CONFIG.EMERGENCY_TABLE_POS.y);
     if (distToTable > CONFIG.EMERGENCY_TABLE_RADIUS) {
       showToast('🏃 Walk into the Cafeteria and stand near the emergency table to call a meeting!', 'warning');
@@ -668,6 +700,39 @@ export default function PlayerApp() {
       callerName: e.myPlayer.name
     });
   }, [exitVentIfNeeded, sendWs, showToast]);
+
+  const handleOpenSabotage = useCallback(() => {
+    const e = engineRef.current;
+    if (e.myPlayer.role !== 'IMPOSTOR' || e.myPlayer.isDead) return;
+    if (e.activeSabotage) {
+      showToast(`⚠️ Another sabotage is already active at ${e.activeSabotage.building}! Only 1 sabotage allowed at a time.`, 'warning');
+      return;
+    }
+    if ((e.sabotageCooldown || 0) > 0) {
+      showToast(`⏳ Sabotage is on cooldown (${Math.ceil(e.sabotageCooldown)}s remaining)!`, 'warning');
+      return;
+    }
+    setSabotageModalOpen(true);
+  }, [showToast]);
+
+  const handleTriggerSabotage = useCallback((target) => {
+    const e = engineRef.current;
+    if (e.myPlayer.role !== 'IMPOSTOR' || e.myPlayer.isDead) return;
+    if (e.activeSabotage) {
+      showToast(`⚠️ Another sabotage is already active at ${e.activeSabotage.building}! Only 1 sabotage allowed at a time.`, 'warning');
+      return;
+    }
+    if ((e.sabotageCooldown || 0) > 0) {
+      showToast(`⏳ Sabotage is on cooldown (${Math.ceil(e.sabotageCooldown)}s remaining)!`, 'warning');
+      return;
+    }
+    e.sabotageCooldown = e.settings.sabotageCooldown || 30;
+    e.activeSabotage = { buildingId: target.id, building: target.name };
+    setActiveSabotage({ ...e.activeSabotage });
+    sendWs({ type: 'SABOTAGE', buildingId: target.id, building: target.name });
+    syncUiSnapshot();
+    showToast(`🚨 Sabotage triggered at ${target.name}!`, 'danger');
+  }, [sendWs, showToast, syncUiSnapshot]);
 
   const handleReportBody = useCallback(() => {
     const e = engineRef.current;
@@ -776,12 +841,31 @@ export default function PlayerApp() {
     showToast(`✅ Question solved! (+${pts} pts) — Total Progress: ${doneCount}/25`, 'success');
   }, [sendWs, showToast, syncUiSnapshot]);
 
+  const handleTaskWrong = useCallback((station, qObj, answer, penalty = 2) => {
+    const e = engineRef.current;
+    const isImp = String(e.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
+    if (isImp) return;
+
+    const qKey = qObj?.id || station?.activeQuestion?.id || station?.id;
+    e.myPlayer.score -= penalty;
+    syncUiSnapshot();
+
+    showToast(`❌ Wrong answer! (-${penalty} pts)`, 'error');
+    sendWs({
+      type: 'TASK_WRONG',
+      taskId: station?.id,
+      questionId: qKey,
+      answer,
+      penalty
+    });
+  }, [sendWs, showToast, syncUiSnapshot]);
+
   const handleSabotagePatched = useCallback((station, line) => {
     const e = engineRef.current;
     const isImp = String(e.myPlayer.role || '').toUpperCase() === 'IMPOSTOR';
     if (!isImp) {
-      e.myPlayer.score += 20;
-      showToast('🔧 Sabotage successfully patched! (+20 pts)', 'success');
+      e.myPlayer.score += 10;
+      showToast('🔧 Sabotage successfully patched! (+10 pts)', 'success');
     } else {
       showToast('🔧 Sabotage patched (Impostors do not receive points for repairs).', 'info');
     }
@@ -789,6 +873,15 @@ export default function PlayerApp() {
     sendWs({ type: 'SABOTAGE', action: 'fix', buildingId: station.id, line, success: true });
     syncUiSnapshot();
   }, [sendWs, showToast, syncUiSnapshot]);
+
+  const handleColorChange = useCallback((newColor) => {
+    const e = engineRef.current;
+    if (e.myPlayer) {
+      e.myPlayer.color = newColor;
+      syncUiSnapshot();
+    }
+    sendWs({ type: 'CHANGE_COLOR', color: newColor });
+  }, [sendWs, syncUiSnapshot]);
 
   return (
     <>
@@ -802,6 +895,7 @@ export default function PlayerApp() {
           myId={myId}
           myPlayer={mySnapshot}
           otherPlayers={otherPlayers}
+          onColorChange={handleColorChange}
         />
       )}
 
@@ -822,6 +916,7 @@ export default function PlayerApp() {
             onProximitySync={setHudProx}
             onTapStation={handleOpenStation}
             onCallEmergency={handleCallEmergency}
+            onAutoExitVent={handleAutoExitVent}
             onShowToast={showToast}
           />
 
@@ -852,13 +947,17 @@ export default function PlayerApp() {
             nearEmergencyTable={hudProx.nearEmergencyTable}
             canKillTarget={hudProx.canKillTarget}
             killCooldown={hudProx.killCooldown}
+            sabotageCooldown={hudProx.sabotageCooldown}
+            emergencyCooldown={hudProx.emergencyCooldown}
+            ventTimeLeft={hudProx.ventTimeLeft ?? 15}
+            activeSabotage={activeSabotage}
             onVote={handleCallEmergency}
             onReport={handleReportBody}
             onToggleVent={handleToggleVent}
             onTravelVent={handleTravelVent}
             onExitVent={exitVentIfNeeded}
             onKill={handleKill}
-            onSabotage={() => setSabotageModalOpen(true)}
+            onSabotage={handleOpenSabotage}
             onTaskOrFix={() => {
               if (hudProx.nearStation) {
                 handleOpenStation(hudProx.nearStation, hudProx.nearSabotage);
@@ -873,18 +972,16 @@ export default function PlayerApp() {
         isSabotage={!!taskModalState?.isSabotage}
         onClose={handleCloseTaskModal}
         onTaskSolved={handleTaskSolved}
+        onTaskWrong={handleTaskWrong}
         onSabotagePatched={handleSabotagePatched}
       />
 
       <SabotageModal
         open={sabotageModalOpen}
         onClose={() => setSabotageModalOpen(false)}
-        onTriggerSabotage={(target) => {
-          engineRef.current.activeSabotage = { buildingId: target.id, building: target.name };
-          sendWs({ type: 'SABOTAGE', buildingId: target.id, building: target.name });
-          syncUiSnapshot();
-          showToast(`🚨 Sabotage triggered at ${target.name}!`, 'danger');
-        }}
+        activeSabotage={activeSabotage}
+        sabotageCooldown={hudProx.sabotageCooldown}
+        onTriggerSabotage={handleTriggerSabotage}
       />
 
       <VotingModal

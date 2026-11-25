@@ -1,7 +1,13 @@
 import React from 'react';
+import { CONFIG } from '../../game/config.js';
 
-export default function LobbyScreen({ lobbyCode, myId, myPlayer, otherPlayers }) {
+export default function LobbyScreen({ lobbyCode, myId, myPlayer, otherPlayers, onColorChange }) {
   const roster = [myPlayer, ...otherPlayers];
+  const otherTakenColors = otherPlayers.map((p) => (p.color || '').toLowerCase());
+  const myColor = (myPlayer?.color || '').toLowerCase();
+  const availableCount = CONFIG.SUIT_COLORS.filter(
+    (h) => !otherTakenColors.includes(h.toLowerCase())
+  ).length;
 
   return (
     <section id="lobbyScreen" className="screen space-bg active">
@@ -43,6 +49,56 @@ export default function LobbyScreen({ lobbyCode, myId, myPlayer, otherPlayers })
               <span className="lobby-player-usn">{p.collegeId || p.usn || ''}</span>
             </div>
           ))}
+        </div>
+
+        <div
+          style={{
+            margin: '14px 0',
+            padding: '12px',
+            background: 'rgba(15, 23, 42, 0.6)',
+            borderRadius: '12px',
+            border: '1px solid rgba(255, 255, 255, 0.08)'
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '8px'
+            }}
+          >
+            <span style={{ fontSize: '12px', fontWeight: 800, color: '#e2e8f0', letterSpacing: '0.5px' }}>
+              🎨 Customize Your Suit Color:
+            </span>
+            <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600 }}>
+              {availableCount}/15 Available
+            </span>
+          </div>
+          <div className="color-picker-grid">
+            {CONFIG.SUIT_COLORS.map((hex) => {
+              const isTaken = otherTakenColors.includes(hex.toLowerCase());
+              const isMyColor = myColor === hex.toLowerCase();
+              return (
+                <button
+                  key={hex}
+                  type="button"
+                  className={`color-swatch ${isMyColor ? 'selected' : ''} ${isTaken ? 'taken' : ''}`}
+                  style={{ background: hex }}
+                  disabled={isTaken || isMyColor}
+                  onClick={() => !isTaken && onColorChange?.(hex)}
+                  title={
+                    isTaken
+                      ? 'Color taken by another crewmate'
+                      : isMyColor
+                      ? 'Your current color'
+                      : `Switch to ${hex}`
+                  }
+                  aria-label={`Select color ${hex}`}
+                />
+              );
+            })}
+          </div>
         </div>
 
         <div className="lobby-waiting-banner">

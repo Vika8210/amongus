@@ -18,10 +18,22 @@ export default function GameCanvas({
   onProximitySync,
   onTapStation,
   onCallEmergency,
+  onAutoExitVent,
   onShowToast
 }) {
   const canvasRef = useRef(null);
   const inputRef = useRef(null);
+
+  // Keep stable callback ref so useEffect never rebinds or destroys InputController on re-renders
+  const callbacksRef = useRef({});
+  callbacksRef.current = {
+    onSendMove,
+    onProximitySync,
+    onTapStation,
+    onCallEmergency,
+    onAutoExitVent,
+    onShowToast
+  };
 
   // Expose resetInput helper on engineRef so modals/screen changes clear stuck touches
   useEffect(() => {
@@ -49,10 +61,18 @@ export default function GameCanvas({
       if (distToTableCenter <= 75) {
         const playerDist = Math.hypot(state.myPlayer.x - CONFIG.EMERGENCY_TABLE_POS.x, state.myPlayer.y - CONFIG.EMERGENCY_TABLE_POS.y);
         if (playerDist <= CONFIG.EMERGENCY_TABLE_RADIUS) {
+          if (state.activeSabotage) {
+            callbacksRef.current.onShowToast?.('🚨 Cannot call emergency meeting during active sabotage! Repair it first.', 'danger');
+            return;
+          }
+          if ((state.emergencyCooldown || 0) > 0) {
+            callbacksRef.current.onShowToast?.(`⏳ Emergency meeting on cooldown (${Math.ceil(state.emergencyCooldown)}s remaining)!`, 'warning');
+            return;
+          }
           inputRef.current?.resetAll();
-          onCallEmergency?.();
+          callbacksRef.current.onCallEmergency?.();
         } else {
-          onShowToast('🏃 Walk closer to the Cafeteria table to call an Emergency Meeting!', 'warning');
+          callbacksRef.current.onShowToast?.('🏃 Walk closer to the Cafeteria table to call an Emergency Meeting!', 'warning');
         }
         return;
       }
@@ -64,9 +84,9 @@ export default function GameCanvas({
           const dist = Math.hypot(state.myPlayer.x - sabStation.x, state.myPlayer.y - sabStation.y);
           if (dist <= CONFIG.SABOTAGE_FIX_RADIUS) {
             inputRef.current?.resetAll();
-            onTapStation(sabStation, true);
+            callbacksRef.current.onTapStation?.(sabStation, true);
           } else {
-            onShowToast(
+            callbacksRef.current.onShowToast?.(
               `🏃 Walk closer to ${sabStation.name} and tap the sabotage console to fix it!`,
               'warning'
             );
@@ -88,9 +108,9 @@ export default function GameCanvas({
             const dist = Math.hypot(state.myPlayer.x - st.x, state.myPlayer.y - st.y);
             if (dist <= CONFIG.PROXIMITY_RADIUS) {
               inputRef.current?.resetAll();
-              onTapStation(st, false);
+              callbacksRef.current.onTapStation?.(st, false);
             } else {
-              onShowToast(`🏃 Move closer to ${st.name} to start this task!`, 'info');
+              callbacksRef.current.onShowToast?.(`🏃 Move closer to ${st.name} to start this task!`, 'info');
             }
             return;
           }
@@ -136,7 +156,7 @@ export default function GameCanvas({
             movePlayerWithCollision(state.myPlayer, dx, dy, speed);
 
             if (now - lastMoveSent > CONFIG.MOVE_SEND_INTERVAL_MS) {
-              onSendMove({
+              callbacksRef.current.onSendMove?.({
                 x: Math.round(state.myPlayer.x),
                 y: Math.round(state.myPlayer.y),
                 vx: dx,
@@ -157,6 +177,23 @@ export default function GameCanvas({
         }
         if (state.killCooldown > 0) {
           state.killCooldown = Math.max(0, state.killCooldown - dt);
+        }
+        if (state.sabotageCooldown > 0) {
+          state.sabotageCooldown = Math.max(0, state.sabotageCooldown - dt);
+        }
+        if (state.emergencyCooldown > 0) {
+          state.emergencyCooldown = Math.max(0, state.emergencyCooldown - dt);
+        }
+
+        // Impostor 15-second vent limit timer
+        if (state.myPlayer.inVent) {
+          if (typeof state.ventTimeLeft !== 'number') state.ventTimeLeft = 15;
+          state.ventTimeLeft = Math.max(0, state.ventTimeLeft - dt);
+          if (state.ventTimeLeft <= 0) {
+            callbacksRef.current.onAutoExitVent?.();
+          }
+        } else {
+          state.ventTimeLeft = 15;
         }
 
         // Proximity detection
@@ -230,11 +267,14 @@ export default function GameCanvas({
         const gameInt = Math.ceil(state.gameTimeLeft || 0);
         const waveInt = Math.ceil(state.taskRefreshTimeLeft || 0);
         const killInt = Math.ceil(state.killCooldown || 0);
-        const syncKey = `${nearStation?.id || ''}|${nearSab}|${nearVent?.id || ''}|${nearBody?.id || ''}|${nearEmergencyTable}|${canKillTarget}|${killInt}|${gameInt}|${waveInt}`;
+        const sabInt = Math.ceil(state.sabotageCooldown || 0);
+        const emerInt = Math.ceil(state.emergencyCooldown || 0);
+        const ventInt = Math.ceil(state.ventTimeLeft ?? 15);
+        const syncKey = `${nearStation?.id || ''}|${nearSab}|${nearVent?.id || ''}|${nearBody?.id || ''}|${nearEmergencyTable}|${canKillTarget}|${killInt}|${sabInt}|${emerInt}|${ventInt}|${gameInt}|${waveInt}`;
         if (syncKey !== lastHudSyncKey || gameInt !== lastTimerInt) {
           lastHudSyncKey = syncKey;
           lastTimerInt = gameInt;
-          onProximitySync({
+          callbacksRef.current.onProximitySync?.({
             nearStation,
             nearSabotage: nearSab,
             nearVent,
@@ -242,6 +282,9 @@ export default function GameCanvas({
             nearEmergencyTable,
             canKillTarget,
             killCooldown: killInt,
+            sabotageCooldown: sabInt,
+            emergencyCooldown: emerInt,
+            ventTimeLeft: ventInt,
             waveTimeLeft: waveInt,
             gameTimeLeft: gameInt
           });
@@ -261,7 +304,7 @@ export default function GameCanvas({
       window.removeEventListener('resize', resize);
       input.destroy();
     };
-  }, [engineRef, isModalOpenRef, onSendMove, onProximitySync, onTapStation, onCallEmergency, onShowToast]);
+  }, [engineRef, isModalOpenRef]);
 
   return <canvas id="gameCanvas" ref={canvasRef} />;
 }

@@ -41,9 +41,21 @@ const BUILDINGS = {
 };
 
 const COLORS = [
-  '#c51111', '#132ed1', '#117f2d', '#ed54ba',
-  '#ef7d0d', '#f5f557', '#3f474e', '#d6e0f0',
-  '#6b2fbb', '#38fedc', '#50ef39', '#71491e'
+  '#c51111', // Red
+  '#132ed1', // Blue
+  '#117f2d', // Green
+  '#ed54ba', // Pink
+  '#ef7d0d', // Orange
+  '#f5f557', // Yellow
+  '#3f474e', // Black
+  '#d6e0f0', // White
+  '#6b2fbb', // Purple
+  '#71491e', // Brown
+  '#38fedc', // Cyan
+  '#50ef39', // Lime
+  '#6b1928', // Maroon
+  '#ecc0d3', // Rose
+  '#fffebe'  // Banana
 ];
 
 const DEFAULT_SETTINGS = {
@@ -52,6 +64,8 @@ const DEFAULT_SETTINGS = {
   questionSection: 1,      // 1: Q1-Q25, 2: Q26-Q50, 3: Q51-Q75
   gameDuration: 600,        // 10 minutes (600 seconds)
   killCooldown: 30,
+  sabotageCooldown: 30,     // at least 30s sabotage cooldown
+  emergencyCooldown: 30,    // 30s emergency meeting cooldown
   respawnTime: 45,
   roleRotationInterval: 180,
   roleRotation: 180,
@@ -73,6 +87,8 @@ const SETTING_KEY_MAP = {
   questionSection: 'questionSection',
   gameDuration: 'gameDuration',
   killCooldown: 'killCooldown',
+  sabotageCooldown: 'sabotageCooldown',
+  emergencyCooldown: 'emergencyCooldown',
   respawnTime: 'respawnTime',
   roleRotation: 'roleRotationInterval',
   roleRotationInterval: 'roleRotationInterval',
@@ -132,6 +148,8 @@ function createLobby(customCode = '') {
     sabotages: {},
     activeSabotage: null,
     sabotageTimeout: null,
+    emergencyCooldownLeft: 30,
+    sabotageCooldownLeft: 30,
     gameLog: [],
     startTime: null
   };
@@ -291,6 +309,27 @@ app.get('/api/lobbies', (req, res) => {
   res.json({ lobbies: getLobbiesSummary() });
 });
 
+app.get('/api/lobby-colors', (req, res) => {
+  const code = String(req.query.code || '').trim().toUpperCase();
+  const lobby = lobbies.get(code);
+  if (!lobby) {
+    return res.json({
+      exists: false,
+      allColors: COLORS,
+      usedColors: [],
+      availableColors: COLORS
+    });
+  }
+  const usedColors = Object.values(lobby.players).map(p => p.color);
+  const availableColors = COLORS.filter(c => !usedColors.includes(c));
+  res.json({
+    exists: true,
+    allColors: COLORS,
+    usedColors,
+    availableColors
+  });
+});
+
 app.get('/state', (req, res) => {
   const code = String(req.query.code || '').trim().toUpperCase();
   const lobby = lobbies.get(code) || (lobbies.size > 0 ? lobbies.values().next().value : null);
@@ -363,13 +402,19 @@ function serializeState(lobby, recipientId = null, isAdmin = false) {
     meeting: lobby.meeting,
     sabotages: lobby.sabotages,
     activeSabotage: lobby.activeSabotage || null,
+    emergencyCooldownLeft: lobby.emergencyCooldownLeft ?? 0,
+    sabotageCooldownLeft: lobby.sabotageCooldownLeft ?? 0,
     gameLog: lobby.gameLog.slice(-50),
     startTime: lobby.startTime,
     timer: lobby.startTime && lobby.phase === 'PLAYING'
       ? Math.max(0, Math.floor((Date.now() - lobby.startTime) / 1000))
       : 0,
     totalTasksAssigned: crew.reduce((a, p) => a + p.tasksAssigned.length, 0),
-    totalTasksCompleted: crew.reduce((a, p) => a + p.tasksCompleted.length, 0)
+    totalTasksCompleted: crew.reduce((a, p) => a + p.tasksCompleted.length, 0),
+    winner: lobby.winner || null,
+    topPlayerName: lobby.topPlayerName || null,
+    topScore: lobby.topScore ?? null,
+    reason: lobby.reason || null
   };
 }
 
@@ -490,9 +535,30 @@ setInterval(() => {
     if (lobby.phase !== 'PLAYING') continue;
     let stateNeedsSync = false;
 
+    if (lobby.emergencyCooldownLeft > 0) {
+      lobby.emergencyCooldownLeft = Math.max(0, lobby.emergencyCooldownLeft - 1);
+    }
+    if (lobby.sabotageCooldownLeft > 0) {
+      lobby.sabotageCooldownLeft = Math.max(0, lobby.sabotageCooldownLeft - 1);
+    }
+
     for (const p of Object.values(lobby.players)) {
       if (p.role === 'impostor' && p.killCooldownLeft > 0) {
         p.killCooldownLeft = Math.max(0, p.killCooldownLeft - 1);
+      }
+
+      if (p.inVent && p.ventEnteredAt && (Date.now() - p.ventEnteredAt >= 15000)) {
+        p.inVent = false;
+        p.ventEnteredAt = null;
+        lobbyLog(lobby, `⏱️ Impostor ${p.name} reached 15s vent limit and was ejected from vent.`);
+        if (p.socket && p.socket.readyState === WebSocket.OPEN) {
+          p.socket.send(JSON.stringify({
+            type: 'NOTIFICATION',
+            msg: '⏱️ Vent limit expired (15s)! Automatically exited vent.',
+            color: '#f97316'
+          }));
+        }
+        stateNeedsSync = true;
       }
 
       if (p.isRespawning && p.respawnTimeLeft > 0) {
@@ -692,8 +758,23 @@ function endGame(lobby, winner, reason = '') {
     }))
     .sort((a, b) => b.score - a.score);
 
-  lobbyLog(lobby, `🏆 GAME ENDED — Winner: ${winner.toUpperCase()} (${reason})`);
-  broadcastToLobby(lobby, { type: 'GAME_END', winner, reason, leaderboard });
+  const topPlayer = leaderboard.length > 0 ? leaderboard[0] : null;
+  const topPlayerName = topPlayer ? topPlayer.name : (winner || 'No One');
+  const topScore = topPlayer ? topPlayer.score : 0;
+  lobby.winner = topPlayerName;
+  lobby.topPlayerName = topPlayerName;
+  lobby.topScore = topScore;
+  lobby.reason = reason;
+
+  lobbyLog(lobby, `🏆 GAME ENDED — Highest Points Winner: ${topPlayerName} (${topScore} pts) — ${reason}`);
+  broadcastToLobby(lobby, {
+    type: 'GAME_END',
+    winner: topPlayerName,
+    topPlayerName,
+    topScore,
+    reason,
+    leaderboard
+  });
   broadcastGameState(lobby);
   broadcastAllAdmins(lobby.code);
 }
@@ -740,6 +821,8 @@ function startGame(lobby) {
   lobby.taskRefreshTimeLeft = 120;
   lobby.sabotages = {};
   lobby.activeSabotage = null;
+  lobby.emergencyCooldownLeft = lobby.settings.emergencyCooldown || 30;
+  lobby.sabotageCooldownLeft = lobby.settings.sabotageCooldown || 30;
   lobby.deadBodies = [];
   lobby.votes = {};
   lobby.meeting = null;
@@ -781,6 +864,8 @@ function resetGame(lobby) {
   lobby.meeting = null;
   lobby.sabotages = {};
   lobby.activeSabotage = null;
+  lobby.emergencyCooldownLeft = lobby.settings.emergencyCooldown || 30;
+  lobby.sabotageCooldownLeft = lobby.settings.sabotageCooldown || 30;
   lobby.deadBodies = [];
   lobby.startTime = null;
 
@@ -931,6 +1016,8 @@ function resolveVoting(lobby) {
   lobby.phase = 'PLAYING';
   lobby.meeting = null;
   lobby.votes = {};
+  lobby.emergencyCooldownLeft = lobby.settings.emergencyCooldown || 30;
+  lobby.sabotageCooldownLeft = lobby.settings.sabotageCooldown || 30;
   lobby.deadBodies = [];
   broadcastToLobby(lobby, { type: 'CLEAR_BODIES' });
   broadcastToLobby(lobby, { type: 'VOTE_RESULT', ejectedId: ejectedName ? ejectedId : null, ejectedName, wasImpostor, tally });
@@ -1037,12 +1124,42 @@ function handleMessage(ws, socketId, msg) {
       }
     }
 
-    const usedColors = Object.values(lobby.players).map(p => p.color);
-    let assignedColor = (prevSession && prevSession.color)
+    const usedColors = Object.values(lobby.players)
+      .filter(p => p.id !== socketId && p.name.toLowerCase() !== resolvedName.toLowerCase())
+      .map(p => (p.color || '').toLowerCase());
+
+    const requestedColor = msg.color ? msg.color.toLowerCase() : null;
+
+    // RULE: Two players cannot choose the same color!
+    if (requestedColor && usedColors.includes(requestedColor)) {
+      ws.send(JSON.stringify({
+        type: 'JOIN_ERROR',
+        msg: `⚠️ The selected spacesuit color is already taken by another player in lobby "${enteredCode}"! Please select an available color.`
+      }));
+      return;
+    }
+
+    if (usedColors.length >= COLORS.length && !prevSession) {
+      ws.send(JSON.stringify({
+        type: 'JOIN_ERROR',
+        msg: `Lobby "${enteredCode}" is full! Maximum ${COLORS.length} players with unique colors reached.`
+      }));
+      return;
+    }
+
+    let assignedColor = (prevSession && prevSession.color && !usedColors.includes(prevSession.color.toLowerCase()))
       ? prevSession.color
-      : (msg.color && !usedColors.includes(msg.color)
+      : (requestedColor && !usedColors.includes(requestedColor)
         ? msg.color
-        : (COLORS.find(c => !usedColors.includes(c)) || COLORS[Math.floor(Math.random() * COLORS.length)]));
+        : COLORS.find(c => !usedColors.includes(c.toLowerCase())));
+
+    if (!assignedColor) {
+      ws.send(JSON.stringify({
+        type: 'JOIN_ERROR',
+        msg: `All ${COLORS.length} colors in this lobby are taken! Cannot join.`
+      }));
+      return;
+    }
 
     const player = {
       id: socketId,
@@ -1294,6 +1411,31 @@ function handleMessage(ws, socketId, msg) {
   const player = lobby.players[socketId];
   if (!player) return;
 
+  if (type === 'CHANGE_COLOR') {
+    if (lobby.phase !== 'LOBBY') return;
+    const newColor = msg.color;
+    if (!newColor || !COLORS.some(c => c.toLowerCase() === String(newColor).toLowerCase())) return;
+
+    const usedColors = Object.values(lobby.players)
+      .filter(p => p.id !== player.id)
+      .map(p => (p.color || '').toLowerCase());
+
+    if (usedColors.includes(String(newColor).toLowerCase())) {
+      sendToPlayer(lobby, player.id, {
+        type: 'NOTIFICATION',
+        msg: '⚠️ That spacesuit color is already taken by another player!',
+        color: '#ef4444'
+      });
+      return;
+    }
+
+    player.color = newColor;
+    lobbyLog(lobby, `🎨 ${player.name} changed suit color to ${newColor}.`);
+    broadcastGameState(lobby);
+    broadcastAllAdmins(lobby.code);
+    return;
+  }
+
   if (type === 'MOVE') {
     if (lobby.phase !== 'PLAYING') return;
     if (player.isDead && !player.isRespawning) return;
@@ -1308,6 +1450,7 @@ function handleMessage(ws, socketId, msg) {
     if (lobby.phase !== 'PLAYING') return;
     if (player.role !== 'impostor' || player.isDead || player.isRespawning) return;
     player.inVent = !!msg.inVent;
+    player.ventEnteredAt = player.inVent ? Date.now() : null;
     if (typeof msg.x === 'number' && typeof msg.y === 'number') {
       player.x = Math.max(40, Math.min(2760, msg.x));
       player.y = Math.max(40, Math.min(1640, msg.y));
@@ -1349,6 +1492,34 @@ function handleMessage(ws, socketId, msg) {
     return;
   }
 
+  if (type === 'TASK_WRONG') {
+    if (lobby.phase !== 'PLAYING' || player.isDead || player.role === 'impostor') return;
+    const { taskId, questionId } = msg;
+    const qKey = questionId || taskId;
+    const penalty = (typeof msg.penalty === 'number' && msg.penalty > 0) ? msg.penalty : 2;
+    player.score -= penalty;
+    const roomName = BUILDINGS[taskId]?.name || taskId || 'Station';
+    lobbyLog(lobby, `❌ Crewmate ${player.name} gave wrong answer for ${qKey} at ${roomName}. (-${penalty} pts, Total: ${player.score})`);
+
+    sendToPlayer(lobby, player.id, {
+      type: 'TASK_RESULT',
+      taskId,
+      questionId: qKey,
+      correct: false,
+      penalty
+    });
+    broadcastToLobby(lobby, {
+      type: 'POINTS_UPDATE',
+      playerId: player.id,
+      points: player.score,
+      reason: `Wrong Answer at ${roomName} (-${penalty} pts)`
+    });
+
+    broadcastGameState(lobby);
+    broadcastAllAdmins(lobby.code);
+    return;
+  }
+
   if (type === 'SABOTAGE') {
     if (lobby.phase !== 'PLAYING') return;
 
@@ -1381,19 +1552,20 @@ function handleMessage(ws, socketId, msg) {
       lobby.activeSabotage = null;
       lobby.sabotages = {};
       if (lobby.sabotageTimeout) { clearTimeout(lobby.sabotageTimeout); lobby.sabotageTimeout = null; }
+      lobby.sabotageCooldownLeft = Math.max(lobby.sabotageCooldownLeft || 0, lobby.settings.sabotageCooldown || 30);
 
       const isCrewmate = player.role === 'crewmate';
       if (isCrewmate) {
-        player.score += 20;
-        lobbyLog(lobby, `🔧 Crewmate ${player.name} repaired sabotage at ${buildingName}! (+20 pts)`);
+        player.score += 10;
+        lobbyLog(lobby, `🔧 Crewmate ${player.name} repaired sabotage at ${buildingName}! (+10 pts)`);
         broadcastToLobby(lobby, { type: 'POINTS_UPDATE', playerId: player.id, points: player.score, reason: 'Repaired Sabotage' });
-        broadcastNotification(lobby, `🔧 Sabotage at ${buildingName} repaired by ${player.name}! (+20 pts)`, '#22c55e');
+        broadcastNotification(lobby, `🔧 Sabotage at ${buildingName} repaired by ${player.name}! (+10 pts)`, '#22c55e');
       } else {
         lobbyLog(lobby, `🔧 Impostor ${player.name} repaired sabotage at ${buildingName} (0 pts).`);
         broadcastNotification(lobby, `🔧 Sabotage at ${buildingName} was repaired by ${player.name}.`, '#38bdf8');
       }
 
-      broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null, repairedBy: player.name });
+      broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null, repairedBy: player.name, sabotageCooldownLeft: lobby.sabotageCooldownLeft });
       broadcastGameState(lobby);
       broadcastAllAdmins(lobby.code);
       return;
@@ -1401,15 +1573,37 @@ function handleMessage(ws, socketId, msg) {
 
     // Trigger Sabotage (Impostor only)
     if (player.role !== 'impostor' || player.isDead || player.isRespawning) return;
+
+    // RULE 1: At a time, Impostor cannot call more than 1 sabotage!
+    if (lobby.activeSabotage) {
+      sendToPlayer(lobby, player.id, {
+        type: 'NOTIFICATION',
+        msg: `⚠️ Sabotage already active at ${lobby.activeSabotage.building}! Only 1 sabotage allowed at a time.`,
+        color: '#f97316'
+      });
+      return;
+    }
+
+    // RULE 2: Sabotage Cooldown (at least 30s)
+    if ((lobby.sabotageCooldownLeft || 0) > 0) {
+      sendToPlayer(lobby, player.id, {
+        type: 'NOTIFICATION',
+        msg: `⏳ Sabotage is on cooldown (${Math.ceil(lobby.sabotageCooldownLeft)}s remaining)!`,
+        color: '#f97316'
+      });
+      return;
+    }
+
     const buildingId = msg.buildingId || msg.taskId || 'reactor';
     const buildingName = msg.building || msg.roomName || (BUILDINGS[buildingId]?.name || 'Reactor');
 
+    lobby.sabotageCooldownLeft = lobby.settings.sabotageCooldown || 30;
     lobby.activeSabotage = { buildingId, building: buildingName, triggeredBy: player.name, startedAt: Date.now() };
     lobby.sabotages[buildingId] = true;
     player.score += 10;
 
     lobbyLog(lobby, `⚡ Impostor ${player.name} sabotaged ${buildingName}! (+10 pts)`);
-    broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: true, buildingId, building: buildingName, roomName: buildingName });
+    broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: true, buildingId, building: buildingName, roomName: buildingName, sabotageCooldownLeft: lobby.sabotageCooldownLeft });
     broadcastToLobby(lobby, { type: 'POINTS_UPDATE', playerId: player.id, points: player.score, reason: 'Sabotage Activated' });
     broadcastNotification(lobby, `⚠️ CRITICAL: Sabotage triggered at ${buildingName}!`, '#ef4444');
 
@@ -1420,6 +1614,7 @@ function handleMessage(ws, socketId, msg) {
         lobby.activeSabotage = null;
         lobby.sabotages = {};
         lobby.sabotageTimeout = null;
+        lobby.sabotageCooldownLeft = Math.max(lobby.sabotageCooldownLeft || 0, lobby.settings.sabotageCooldown || 30);
 
         // Deduct 2 points from every crewmate because the sabotage was not fixed
         Object.values(lobby.players).forEach(p => {
@@ -1436,7 +1631,7 @@ function handleMessage(ws, socketId, msg) {
 
         lobbyLog(lobby, `⚠️ Sabotage at ${name} expired without being repaired! -2 pts deducted from each Crewmate.`);
         broadcastNotification(lobby, `💥 Sabotage at ${name} was unresolved! -2 pts to all Crewmates!`, '#ef4444');
-        broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null });
+        broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null, sabotageCooldownLeft: lobby.sabotageCooldownLeft });
         broadcastGameState(lobby);
         broadcastAllAdmins(lobby.code);
       }
@@ -1542,11 +1737,42 @@ function handleMessage(ws, socketId, msg) {
         }
         return;
       }
+      if (lobby.activeSabotage) {
+        lobby.activeSabotage = null;
+        lobby.sabotages = {};
+        if (lobby.sabotageTimeout) { clearTimeout(lobby.sabotageTimeout); lobby.sabotageTimeout = null; }
+        broadcastToLobby(lobby, { type: 'SABOTAGE_ALERT', active: false, buildingId: null, building: null, sabotageCooldownLeft: 30 });
+      }
       startVoting(lobby, player.name, msg.reason || 'Reported a Dead Body');
       return;
     }
 
-    // Emergency Meeting: Must be within proximity of the Cafeteria emergency table
+    // Emergency Meeting:
+    // 1) During sabotage, crewmates/impostors cannot call emergency meeting!
+    if (lobby.activeSabotage) {
+      if (player.socket && player.socket.readyState === WebSocket.OPEN) {
+        player.socket.send(JSON.stringify({
+          type: 'NOTIFICATION',
+          msg: `🚨 Cannot call emergency meeting during active sabotage! Fix ${lobby.activeSabotage.building} first.`,
+          color: '#ef4444'
+        }));
+      }
+      return;
+    }
+
+    // 2) Cooldown for calling emergency meeting (at least 30s)
+    if ((lobby.emergencyCooldownLeft || 0) > 0) {
+      if (player.socket && player.socket.readyState === WebSocket.OPEN) {
+        player.socket.send(JSON.stringify({
+          type: 'NOTIFICATION',
+          msg: `⏳ Emergency meeting is on cooldown (${Math.ceil(lobby.emergencyCooldownLeft)}s remaining)!`,
+          color: '#f97316'
+        }));
+      }
+      return;
+    }
+
+    // 3) Must be within proximity of the Cafeteria emergency table
     const distToTable = Math.hypot(player.x - 1540, player.y - 340);
     if (distToTable > 165) {
       if (player.socket && player.socket.readyState === WebSocket.OPEN) {
@@ -1559,6 +1785,7 @@ function handleMessage(ws, socketId, msg) {
       return;
     }
 
+    lobby.emergencyCooldownLeft = lobby.settings.emergencyCooldown || 30;
     startVoting(lobby, player.name, 'Emergency Meeting');
     return;
   }
