@@ -42,7 +42,7 @@ export default function AdminLogin({ onAuthenticated }) {
         <div id="loginError">{error}</div>
 
         <div className="login-hint">
-          Authorized access only. Default: <code>{CONFIG.ADMIN_KEY}</code>
+          Authorized access only.
         </div>
       </form>
     </div>

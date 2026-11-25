@@ -57,7 +57,7 @@ Runs both the backend server (`port 3000`) and the Vite dev server (`port 5173`)
 npm run dev
 ```
 - **Player App:** `http://localhost:5173`
-- **Admin Panel:** `http://localhost:5173/admin` (Password: `sdmcet2024`)
+- **Admin Panel:** `http://localhost:5173/admin` (Password: `Vik@#123`)
 
 ### 3. Production / Event Mode
 Builds the React client into `dist/` and serves both the client and WebSocket server on a single port (`3000`) for mobile phones on local Wi-Fi:
@@ -66,10 +66,10 @@ npm run build
 npm start
 ```
 - **Player App:** `http://localhost:3000` (or `http://<YOUR_LOCAL_IP>:3000`)
-- **Admin Panel:** `http://localhost:3000/admin` (Password: `sdmcet2024`)
+- **Admin Panel:** `http://localhost:3000/admin` (Password: `Vik@#123`)
 - **QR Code:** `http://localhost:3000/qr`
 
 ---
 
 ## 👥 Default Credentials
-- **Admin Password:** `sdmcet2024`
+- **Admin Password:** `Vik@#123`

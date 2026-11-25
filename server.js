@@ -237,7 +237,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = 'sdmcet2024';
+const ADMIN_KEY = process.env.ADMIN_KEY || 'Vik@#123';
 
 function getLocalIP() {
   const nets = os.networkInterfaces();
